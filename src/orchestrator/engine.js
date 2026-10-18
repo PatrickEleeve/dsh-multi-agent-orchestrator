@@ -506,10 +506,13 @@ export class Engine {
           previous: p.previous ?? (p.label === 'critique' ? await this.readArtifacts(wf) : undefined),
         })
         const prompt = lastErrors.length ? `${basePrompt}\n\nYour previous answer was rejected by validation: ${lastErrors.join('; ')}. Follow the output format exactly.` : basePrompt
+        const model = p.label === 'critique'
+          ? (this.config.roles.architect.critiqueModel ?? this.config.roles.architect.model)
+          : this.config.roles.architect.model
         const result = await this.callBackend(wf, `architect:${p.label}`, 'claude-cli', (extra) =>
           this.backends.architect.execute(
             { prompt, cwd: wf.workspace.path, runId: `${wf.id}-arch-${p.label}-${attempt}` },
-            { model: this.config.roles.architect.model, timeoutMs: this.config.roles.architect.timeoutMs, signal, permissionMode: this.config.roles.architect.permissionMode, ...extra },
+            { model, timeoutMs: this.config.roles.architect.timeoutMs, signal, permissionMode: this.config.roles.architect.permissionMode, ...extra },
           ), signal)
         const parsed = parseArchitectOutput(result.text)
         if (parsed.ok) docs = parsed.files

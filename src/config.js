@@ -19,6 +19,10 @@ export const DEFAULTS = Object.freeze({
       backend: 'claude-cli',
       executable: 'claude',
       model: 'opus',
+      // Thorough mode runs a second, independent architecture pass. It defaults
+      // to a stronger model so the design is reviewed by Opus even when the
+      // first pass used a cheaper one.
+      critiqueModel: 'opus',
       permissionMode: 'plan',
       timeoutMs: 15 * 60_000,
     },
@@ -105,6 +109,7 @@ export function resolveConfig(raw = {}) {
   if (r.implementer.backend !== 'dsh-native') errors.push('roles.implementer.backend must be dsh-native')
   if (r.reviewer.backend !== 'codex-cli') errors.push('roles.reviewer.backend must be codex-cli')
   if (r.architect.permissionMode !== 'plan') errors.push('roles.architect.permissionMode must be plan (read-only)')
+  if (typeof r.architect.critiqueModel !== 'string' || r.architect.critiqueModel.trim() === '') errors.push('roles.architect.critiqueModel must be a non-empty string')
   if (r.reviewer.sandbox !== 'read-only') errors.push('roles.reviewer.sandbox must be read-only')
   if (!['claude-cli', 'none'].includes(r.reviewer.fallbackBackend)) errors.push("roles.reviewer.fallbackBackend must be 'claude-cli' or 'none' (the paid API backend cannot be a fallback)")
   if (typeof r.reviewer.fallbackModel !== 'string' || r.reviewer.fallbackModel.trim() === '') errors.push('roles.reviewer.fallbackModel must be a non-empty string')

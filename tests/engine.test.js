@@ -313,6 +313,24 @@ test('fast mode skips architect and review; thorough adds critique and human app
   assert.equal(wf.state, 'COMPLETED'); assert.equal(s.calls.rev.length, 1)
 })
 
+test('thorough mode reviews the architecture with the configured critique model', async () => {
+  const models = []
+  const s = await setup({
+    impl: good,
+    config: { roles: { architect: { model: 'sonnet', critiqueModel: 'opus' } } },
+    arch: async (req, opt) => {
+      models.push(`${opt.model} :: ${req.prompt.slice(0, 40).replace(/\n/g, ' ')}`)
+      return { ok: true, backend: 'claude-cli', text: archText(), model: opt.model, modelVerified: true, durationMs: 1 }
+    },
+  })
+  const wf = await s.run({ mode: 'thorough' })
+  assert.equal(wf.state, 'BLOCKED') // thorough waits for human approval
+  assert.equal(wf.blocker.kind, 'awaiting_approval')
+  assert.deepEqual(models.map((m) => m.split(' :: ')[0]), ['sonnet', 'opus'])
+  const architectStages = wf.stages.filter((stage) => String(stage.role).startsWith('architect'))
+  assert.deepEqual(architectStages.map((stage) => [stage.role, stage.model]), [['architect:design', 'sonnet'], ['architect:critique', 'opus']])
+})
+
 test('one workflow at a time (maxParallelWorkers=1)', async () => {
   let release
   let releaseSignal

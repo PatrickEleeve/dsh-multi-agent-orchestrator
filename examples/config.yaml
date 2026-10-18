@@ -3,7 +3,7 @@
   config:
     orchestrator: { mode: balanced, maxFixCycles: 3 }
     roles:
-      architect: { model: opus }
+      architect: { model: sonnet, critiqueModel: opus }   # design model and the independent architecture review
       implementer: { provider: deepseek-account, model: auto, reasoning: max }
       reviewer: { model: default, fallbackBackend: claude-cli, fallbackModel: opus }   # model: gpt-6-astra / gpt-6-sol; fallbackBackend: none disables the Claude fallback
     verification: { commands: ["npm test"] }

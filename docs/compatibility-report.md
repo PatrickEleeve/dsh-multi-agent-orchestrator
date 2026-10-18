@@ -39,4 +39,6 @@ Independent code review of v1.3.3 (Opus 5.5) produced 5 Critical + 8 High findin
 
 Reviewer fallback: `codex-cli` rate-limit/auth/unavailable/timeout now falls back once to the subscribed Claude CLI, recorded in `wf.fallbacks` + stage `reviewer:fallback` + report/notice; `fallbackBackend: 'none'` keeps fail-closed. Unit-tested both ways.
 
+Architecture review model: `roles.architect.critiqueModel` (default `opus`) drives thorough mode's second architecture pass, independent from `roles.architect.model`; live verification pending a thorough run in which `architect:design` and `architect:critique` report different models.
+
 Not verified: DSH-level sandbox restriction of the native child (profile runs danger-full-access; child inherits parent permissions). Mitigation: post-run checks that the original repo is untouched and `.orchestrator/` spec is intact; worktree is not a security sandbox.

@@ -31,6 +31,10 @@ ctx.subagents.startActivation({
 ```
 `delivery: 'caller'` returns `{childId, result, dispose}` so the orchestrator awaits the child instead of relying on a parent notice. Result `output` is the child's final assistant text, `stopReason: 'completed'` means success. The result does **not** echo the model, so identity comes from `ctx.llm.listModels(provider)` membership (`modelVerified` = catalog membership) — never from the child's prose. `roles.implementer.model: auto` resolves to the advertised id containing `1017`, else `*flash*`, else the first entry; with the current profile that is `deepseek-flash`. No token usage is exposed by the activation result; the report shows `null` rather than an estimate.
 
+## Architecture critique model
+
+`roles.architect.critiqueModel` (default `opus`) is used for the second architecture pass that thorough mode adds after the design. Both passes run through the Claude CLI in plan mode; the stage list records `architect:design`/`architect:critique` with their reported models, so the panel and report show exactly which model reviewed the architecture.
+
 ## Reviewer fallback (Codex → Claude CLI)
 
 `roles.reviewer.fallbackBackend` (default `claude-cli`) is used only when the Codex CLI result is `rate_limit`, `unavailable`, `auth` or `timeout`. The same review prompt is sent to `claude -p --model <fallbackModel> --permission-mode plan --setting-sources user`; the answer is parsed by the same schema validator, so a malformed fallback review still cannot approve. The workflow records `fallbacks: [{role, from, to, reason, model}]`, the stage appears as `reviewer:fallback`, and the report/notice state the substitution. `none` keeps strict fail-closed.

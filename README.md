@@ -28,6 +28,10 @@ Design rules (from two Opus 5.5 design reviews): 4/8/12/16/24 spacing, an 11/12/
 - **Jobs panel**: each workflow registers as a native background job (`orchestrate-<id>`) with a live progress line such as `balanced: IMPLEMENTING · implementer (dsh-native) · 2 stages done`. The shipped job tools read its log (`job_output`) and stop it (`job_kill`), which cancels the workflow.
 - **`/orchestrate status [id]`** prints the stage timeline; the id is optional.
 
+## Architecture review model
+
+Thorough mode runs two architecture passes: the design (`roles.architect.model`) and an independent critique (`roles.architect.critiqueModel`, default **`opus`**). So a cheap design model can still be reviewed by Opus 5.5 — the two stages are recorded separately with their reported models.
+
 ## When the reviewer's subscription is exhausted
 
 If the Codex CLI reports a usage limit (or is unavailable / unauthenticated / timed out), the review falls back to the **Claude Code CLI** (`roles.reviewer.fallbackBackend: 'claude-cli'`, default) instead of blocking. The fallback is explicit and auditable: the stage is recorded as `reviewer:fallback` with the Claude-reported model, `report.md` gains a "Reviewer fallbacks" section, and the chat notice says which backend failed and why. It never falls back to a paid API and never happens twice for one workflow; setting `fallbackBackend: 'none'` restores strict fail-closed behaviour.
