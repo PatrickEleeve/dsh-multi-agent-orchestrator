@@ -120,7 +120,45 @@ test('a rate-limited reviewer falls back to the Claude CLI and records it', asyn
   assert.ok(wf.stages.some((stage) => stage.role === 'reviewer:fallback' && stage.ok && stage.backend === 'claude-cli'))
   const report = await fs.readFile(path.join(s.store.dir(wf.id), 'report.md'), 'utf8')
   assert.match(report, /Reviewer fallbacks/)
-  assert.match(report, /codex-cli → claude-cli \(rate_limit\)|Reviewer fallbacks/)
+  assert.match(report, /- \d{4}-\d\d-\d\dT[^ ]+ reviewer: codex-cli → claude-cli \(rate_limit/)
+})
+
+test('the reviewer falls back at most once per workflow', async () => {
+  let reviewRound = 0
+  const finding = [{ severity: 'medium', category: 'correctness', file: 'a.js', line: 1, description: 'x', suggested_fix: 'y' }]
+  const s = await setup({
+    impl: good,
+    rev: () => ({ ok: false, backend: 'codex-cli', error: { kind: 'rate_limit', message: 'usage limit' }, durationMs: 1 }),
+    arch: async (req) => {
+      if (!/INDEPENDENT CODE REVIEWER/.test(req.prompt)) return { ok: true, backend: 'claude-cli', text: archText(), model: 'claude-sonnet-5-5', durationMs: 1 }
+      reviewRound += 1
+      return { ok: true, backend: 'claude-cli', text: JSON.stringify({ verdict: 'REQUEST_CHANGES', summary: 'again', findings: finding }), model: 'claude-opus-5-5', durationMs: 1 }
+    },
+  })
+  const wf = await s.run()
+  assert.equal(reviewRound, 1, 'only the first review may use the Claude fallback')
+  assert.equal(wf.state, 'BLOCKED')
+  assert.equal(wf.blocker.kind, 'rate_limit')
+  assert.equal(wf.fallbacks.length, 1)
+})
+
+test('a parse retry after a fallback stays on the fallback backend', async () => {
+  let claudeReviewCalls = 0
+  const s = await setup({
+    impl: good,
+    rev: () => ({ ok: false, backend: 'codex-cli', error: { kind: 'rate_limit', message: 'usage limit' }, durationMs: 1 }),
+    arch: async (req) => {
+      if (!/INDEPENDENT CODE REVIEWER/.test(req.prompt)) return { ok: true, backend: 'claude-cli', text: archText(), model: 'claude-sonnet-5-5', durationMs: 1 }
+      claudeReviewCalls += 1
+      const text = claudeReviewCalls === 1 ? 'not json at all' : JSON.stringify({ verdict: 'APPROVE', summary: 'ok', findings: [] })
+      return { ok: true, backend: 'claude-cli', text, model: 'claude-opus-5-5', durationMs: 1 }
+    },
+  })
+  const wf = await s.run()
+  assert.equal(wf.state, 'COMPLETED', JSON.stringify(wf.blocker))
+  assert.equal(claudeReviewCalls, 2, 'the retry must not go back to the rate-limited Codex')
+  assert.equal(wf.fallbacks.length, 1)
+  assert.equal(wf.reviews[0].backend, 'claude-cli')
 })
 
 test('with the fallback disabled a rate-limited reviewer still blocks', async () => {
@@ -146,7 +184,7 @@ test('provider auth failure blocks (no fallback) and workflow resumes from the b
   const s = await setup({ impl: good, arch: (r, o, n) => (up ? { ok: true, backend: 'claude-cli', text: archText(), model: 'claude-opus-5-5' } : { ok: false, backend: 'claude-cli', error: { kind: 'rate_limit', message: 'usage limit' }, durationMs: 1 }) })
   let wf = await s.run()
   assert.equal(wf.state, 'BLOCKED'); assert.equal(wf.blocker.kind, 'rate_limit'); assert.equal(s.calls.impl.length, 0)
-  assert.match(wf.blocker.message, /No fallback backend/)
+  assert.match(wf.blocker.message, /No silent backend switch|resume/)
   up = true
   await s.engine.resume(wf.id, { id: 'p' }); await s.engine.live.get(wf.id)?.promise
   wf = await s.store.load(wf.id)
@@ -320,7 +358,9 @@ test('thorough mode reviews the architecture with the configured critique model'
     config: { roles: { architect: { model: 'sonnet', critiqueModel: 'opus' } } },
     arch: async (req, opt) => {
       models.push(`${opt.model} :: ${req.prompt.slice(0, 40).replace(/\n/g, ' ')}`)
-      return { ok: true, backend: 'claude-cli', text: archText(), model: opt.model, modelVerified: true, durationMs: 1 }
+      // Report a model id different from the requested alias, so a stage that
+      // merely echoed the request cannot pass this test.
+      return { ok: true, backend: 'claude-cli', text: archText(), model: opt.model === 'opus' ? 'claude-opus-5-5' : 'claude-sonnet-5-5', modelVerified: true, durationMs: 1 }
     },
   })
   const wf = await s.run({ mode: 'thorough' })
@@ -328,7 +368,10 @@ test('thorough mode reviews the architecture with the configured critique model'
   assert.equal(wf.blocker.kind, 'awaiting_approval')
   assert.deepEqual(models.map((m) => m.split(' :: ')[0]), ['sonnet', 'opus'])
   const architectStages = wf.stages.filter((stage) => String(stage.role).startsWith('architect'))
-  assert.deepEqual(architectStages.map((stage) => [stage.role, stage.model]), [['architect:design', 'sonnet'], ['architect:critique', 'opus']])
+  assert.deepEqual(architectStages.map((stage) => [stage.role, stage.model]), [['architect:design', 'claude-sonnet-5-5'], ['architect:critique', 'claude-opus-5-5']])
+  // The report-model is what the CLI reported, not what we asked for.
+  // The stage records only what the backend reported; the requested alias is not invented.
+  assert.deepEqual(architectStages.map((stage) => stage.requestedModel), [null, null])
 })
 
 test('one workflow at a time (maxParallelWorkers=1)', async () => {

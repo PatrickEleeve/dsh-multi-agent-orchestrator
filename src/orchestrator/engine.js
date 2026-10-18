@@ -468,7 +468,7 @@ export class Engine {
       if (result.ok) return result
       if (result.error?.kind === 'cancelled' || signal.aborted) throw new Halt('cancelled', 'cancelled')
       if (BLOCKING_KINDS.has(result.error?.kind)) {
-        throw this.block(result.error.kind, `${role} backend "${backendName}" unavailable (${result.error.kind}): ${result.error.message}. Workflow state preserved; fix the backend and run "/orchestrate resume ${wf.id}". No fallback backend was activated.`)
+        throw this.block(result.error.kind, `${role} backend "${backendName}" unavailable (${result.error.kind}): ${result.error.message}. Workflow state preserved; fix the backend and run "/orchestrate resume ${wf.id}".`)
       }
     }
     throw this.block('backend_failed', `${role} backend "${backendName}" failed after ${MAX_STAGE_RETRIES + 1} attempts: ${result.error?.message ?? 'unknown error'}`)
@@ -620,6 +620,8 @@ export class Engine {
     const prompt = buildReviewPrompt({ task: wf.task, docs: await this.readArtifacts(wf), changes, verification: wf.verification, baseSha: wf.workspace.baseSha })
     let review
     let parseError
+    let fallbackUsed = false
+    let lastBackend = 'codex-cli'
     for (let attempt = 0; attempt < 2 && !review; attempt++) {
       const request = {
         prompt: parseError ? `${prompt}\n\nYour previous reply was rejected: ${parseError}. Reply with only the JSON object.` : prompt,
@@ -631,8 +633,16 @@ export class Engine {
           { ...request, outputSchema: REVIEW_SCHEMA },
           { model: this.config.roles.reviewer.model, timeoutMs: this.config.roles.reviewer.timeoutMs, signal, scratchDir: this.store.dir(wf.id), ...extra },
         ), signal)
+      const byClaude = () => this.callBackend(wf, 'reviewer:fallback', 'claude-cli', (extra) =>
+        this.backends.architect.execute(
+          { ...request, runId: `${request.runId}-fallback` },
+          { model: this.config.roles.reviewer.fallbackModel, timeoutMs: this.config.roles.reviewer.timeoutMs, signal, permissionMode: 'plan', ...extra },
+        ), signal)
       let result
-      try {
+      // A parse retry after a fallback must not bounce back to a Codex that is
+      // still rate-limited (and whose fallback budget is spent).
+      if (fallbackUsed) result = await byClaude()
+      else try {
         result = await byCodex()
       } catch (error) {
         // Only an unavailable/rate-limited reviewer falls back, only to the
@@ -650,13 +660,11 @@ export class Engine {
           reason: error.blockKind,
           model: this.config.roles.reviewer.fallbackModel,
         }]
+        fallbackUsed = true
         await this.persist(wf)
-        result = await this.callBackend(wf, 'reviewer:fallback', 'claude-cli', (extra) =>
-          this.backends.architect.execute(
-            { ...request, runId: `${request.runId}-fallback` },
-            { model: this.config.roles.reviewer.fallbackModel, timeoutMs: this.config.roles.reviewer.timeoutMs, signal, permissionMode: 'plan', ...extra },
-          ), signal)
+        result = await byClaude()
       }
+      lastBackend = result.backend ?? (fallbackUsed ? 'claude-cli' : 'codex-cli')
       const parsed = parseReview(result.text)
       if (parsed.ok) review = parsed.review
       else parseError = parsed.error
@@ -673,7 +681,8 @@ export class Engine {
     wf.reviews.push({
       at: new Date().toISOString(),
       ...review,
-      backend: (wf.fallbacks ?? []).some((entry) => entry.role === 'reviewer') ? 'claude-cli' : 'codex-cli',
+      // The backend that actually produced this review, not "any fallback ever".
+      backend: lastBackend,
     })
     await this.persist(wf)
     if (review.verdict === 'BLOCKED') throw this.block('review_blocked', `Reviewer reported BLOCKED: ${review.summary}`)

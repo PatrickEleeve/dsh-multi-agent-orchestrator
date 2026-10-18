@@ -114,12 +114,19 @@ export async function restoreInfoExclude(snapshot) {
   const infoStat = await fs.lstat(infoDir).catch(() => null)
   if (infoStat === null) await fs.mkdir(infoDir, { recursive: true })
   else if (!(await realDir(infoDir))) return false
+  const firstInfoStat = await fs.lstat(infoDir).catch(() => null)
+  if (firstInfoStat === null) return false
   const excludePath = path.join(infoDir, 'exclude')
   const excludeStat = await fs.lstat(excludePath).catch(() => null)
   if (excludeStat !== null) {
     if (!excludeStat.isFile() || excludeStat.isSymbolicLink()) return false
     await fs.unlink(excludePath)
   }
+  // Re-check immediately before writing: a swap to a symlink between the checks
+  // must not be followed.
+  const finalInfoStat = await fs.lstat(infoDir).catch(() => null)
+  if (finalInfoStat === null || !finalInfoStat.isDirectory() || finalInfoStat.isSymbolicLink()) return false
+  if (finalInfoStat.dev !== firstInfoStat.dev || finalInfoStat.ino !== firstInfoStat.ino) return false
   await fs.writeFile(excludePath, snapshot.infoExclude, { flag: 'wx' })
   return true
 }

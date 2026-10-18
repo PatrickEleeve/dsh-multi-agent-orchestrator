@@ -180,3 +180,25 @@ test('restoreInfoExclude refuses to write through a symlinked .git/info', async 
   assert.equal(await fs.readFile(victim, 'utf8'), 'untouched\n', 'nothing outside the repo may be overwritten')
   await dataDir
 })
+
+
+test('restoreInfoExclude refuses a symlinked exclude file and a symlinked common dir', async () => {
+  const repoDir = await repo()
+  const snapshot = await snapshotRepo(new Git(), repoDir)
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'orch-outside2-'))
+  const victim = path.join(outside, 'victim')
+  await fs.writeFile(victim, 'untouched\n')
+  const infoDir = path.join(repoDir, '.git', 'info')
+  await fs.mkdir(infoDir, { recursive: true })
+  const excludePath = path.join(infoDir, 'exclude')
+  await fs.rm(excludePath, { force: true })
+  await fs.symlink(victim, excludePath)
+  assert.equal(await restoreInfoExclude(snapshot), false)
+  assert.equal(await fs.readFile(victim, 'utf8'), 'untouched\n')
+
+  const fakeCommon = path.join(outside, 'gitlike')
+  await fs.mkdir(fakeCommon, { recursive: true })
+  const symlinkedCommon = path.join(outside, 'git-link')
+  await fs.symlink(fakeCommon, symlinkedCommon, 'dir')
+  assert.equal(await restoreInfoExclude({ ...snapshot, gitCommonDir: symlinkedCommon, infoExclude: 'x\n' }), false)
+})
