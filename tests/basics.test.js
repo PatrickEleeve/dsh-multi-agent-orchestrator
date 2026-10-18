@@ -94,6 +94,7 @@ test('command grammar', () => {
   assert.equal(parseOrchestrateInput('').action, 'help')
   assert.deepEqual(parseOrchestrateInput('status wf-1'), { action: 'status', verify: [], id: 'wf-1' })
   assert.equal(parseOrchestrateInput('cancel wf-9').id, 'wf-9')
+  assert.equal(parseOrchestrateInput('budget').action, 'budget')
   const resume = parseOrchestrateInput('resume wf-9 --verify "npm test" --verify "node lint.js"')
   assert.equal(resume.action, 'resume'); assert.equal(resume.id, 'wf-9')
   assert.deepEqual(resume.verify, ['npm test', 'node lint.js'])

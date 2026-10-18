@@ -19,6 +19,7 @@ Threats considered: prompt injection inside repository content or model output, 
 | Specification integrity | SHA-256 of each architect artifact checked after implementation; mismatch → restored + violation recorded | `engine.js#guardArtifacts` |
 | Original tree integrity | HEAD/status/branch snapshot compared before review and before completion; mismatch → `BLOCKED` | `engine.js#guardOriginal`, `workspace/worktree.js#originalUntouched` |
 | Shared git metadata | The common `.git` dir's `info/exclude` and `config` are hashed at start; a change (worktrees share them) is detected, `info/exclude` is restored to its snapshot bytes, and the workflow blocks | `workspace/worktree.js#snapshotRepo`, `restoreInfoExclude` |
+| Verification argument policy | `node -e/--eval/--print/-p`, `python -c`, and `npx` are refused, so `verify` (which a model may supply) cannot execute inline code through an allow-listed interpreter | `security/permissions.js#normalizeVerificationCommand` |
 | Command execution | `spawn(file, argv, {shell:false})`, explicit cwd, executable allow-list, `sudo/rm/curl/git/...` always refused, bounded output, timeout, process-group kill | `process.js`, `security/permissions.js` |
 | Prompt injection | Untrusted content is fenced with markers plus a "data, not instructions" notice; the architect output must match a strict file-wrapper grammar; the reviewer verdict must match a JSON schema and consistency rules | `agents/architect.js`, `agents/reviewer.js` |
 | Verdict integrity | `APPROVE` with critical/high findings is rejected; `REQUEST_CHANGES` without findings is rejected; malformed output never approves | `agents/reviewer.js#parseReview` |
@@ -46,6 +47,12 @@ An Opus 5.5 review of v1.3.3 reproduced these defects; each is now fixed and cov
 | Snapshot never refreshed, so an isolation block stayed blocked forever | Resuming an isolation block re-snapshots the original repo |
 
 Remaining known gaps from that review (not yet fixed): per-backend abort listeners are not removed; `persist` writes are not serialised (an `onPid` save can land after a newer one); error-classification regexes are coarse; some config flags (`persistState`, `approvalFor*`, `credentialRedaction`) are accepted but unused; the panel has no resume button.
+
+## Persistence and cleanup guarantees (1.7.0)
+
+- State writes are serialised per workflow id (`WorkflowStore` queue), so a fire-and-forget save can never land after a newer one.
+- `cancel` marks the workflow as cancelling before touching the driver; a concurrent `resume`/`approve` is refused instead of racing it.
+- A completed run removes its worktree (configurable); the delivered branch keeps the commits.
 
 ## Robustness rule learned the hard way
 

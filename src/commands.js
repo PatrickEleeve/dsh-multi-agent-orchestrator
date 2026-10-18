@@ -1,7 +1,7 @@
 /** `/orchestrate` grammar (pure; unit tested). */
 import { splitCommand } from './config.js'
 
-export const SUBCOMMANDS = ['run', 'status', 'cancel', 'models', 'test-connections', 'config', 'resume', 'approve', 'report', 'help']
+export const SUBCOMMANDS = ['run', 'status', 'cancel', 'models', 'test-connections', 'config', 'budget', 'resume', 'approve', 'report', 'help']
 
 /**
  * @param {string} rawInput text after "/orchestrate"
@@ -60,4 +60,5 @@ export const HELP = `/orchestrate <development task> [--mode fast|balanced|thoro
 /orchestrate models
 /orchestrate test-connections
 /orchestrate config
+/orchestrate budget
 Pipeline: Claude architect (CLI) → DeepSeek implementer (DSH native child) → deterministic verification → Codex reviewer (CLI) → repair loop → delivery on an isolated branch (never merged or pushed).`

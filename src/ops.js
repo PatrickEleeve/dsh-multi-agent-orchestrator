@@ -136,10 +136,57 @@ export function createOps({ ctx, config, engine, store, backends, resolveRepo, j
         case 'models': return this.models(agent)
         case 'test-connections': return this.testConnections(agent)
         case 'config': return this.config()
+        case 'budget': return this.budget()
         default: return HELP
       }
     },
 
     metrics: async (id) => dump(computeMetrics(await latest(id))),
+
+    /** Actual spend/usage across every workflow, subscription and API kept apart. */
+    async budget() {
+      const all = await store.list()
+      const agg = {
+        workflows: all.length,
+        byState: {},
+        paidApiCostUSD: 0,
+        subscriptionNotionalListCostUSD: 0,
+        backendCalls: {},
+        inputTokens: 0,
+        outputTokens: 0,
+        reasoningTokens: 0,
+        verificationRuns: 0,
+        reviewRounds: 0,
+        fixCycles: 0,
+        reviewerFallbacks: 0,
+      }
+      for (const wf of all) {
+        agg.byState[wf.state] = (agg.byState[wf.state] ?? 0) + 1
+        for (const stage of wf.stages ?? []) {
+          const backend = stage.backend ?? 'unknown'
+          agg.backendCalls[backend] = (agg.backendCalls[backend] ?? 0) + 1
+          const notional = stage.billing?.notionalListCostUSD
+          if (typeof notional === 'number') agg.subscriptionNotionalListCostUSD += notional
+          agg.inputTokens += stage.usage?.inputTokens ?? 0
+          agg.outputTokens += stage.usage?.outputTokens ?? 0
+          agg.reasoningTokens += stage.usage?.reasoningTokens ?? 0
+        }
+        agg.verificationRuns += (wf.verificationHistory ?? []).length
+        agg.reviewRounds += (wf.reviews ?? []).length
+        agg.fixCycles += wf.fixCycles ?? 0
+        agg.reviewerFallbacks += (wf.fallbacks ?? []).length
+      }
+      const lines = [
+        'Orchestrator budget',
+        `  workflows: ${agg.workflows} (${Object.entries(agg.byState).map(([k, v]) => `${k} ${v}`).join(', ') || 'none'})`,
+        `  paid API spend: $${agg.paidApiCostUSD.toFixed(2)}  (no paid backend is ever activated)`,
+        `  subscription notional list cost: $${agg.subscriptionNotionalListCostUSD.toFixed(4)}  (list price of subscription runs — NOT a charge)`,
+        `  backend calls: ${Object.entries(agg.backendCalls).map(([k, v]) => `${k} ${v}`).join(', ') || 'none'}`,
+        `  tokens reported by backends: input ${agg.inputTokens}, output ${agg.outputTokens}, reasoning ${agg.reasoningTokens}`,
+        `  verification runs: ${agg.verificationRuns}   review rounds: ${agg.reviewRounds}   fix cycles: ${agg.fixCycles}   reviewer fallbacks: ${agg.reviewerFallbacks}`,
+        '  note: DeepSeek child usage and Codex usage are not exposed by their runtimes, so they stay blank rather than estimated.',
+      ]
+      return lines.join('\n')
+    },
   }
 }

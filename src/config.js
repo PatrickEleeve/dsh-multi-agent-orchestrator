@@ -12,6 +12,9 @@ export const DEFAULTS = Object.freeze({
     autoMerge: false,
     autoPush: false,
     persistState: true,
+    // Completed runs remove their isolated worktree (the delivered branch keeps
+    // the commits); set to false to inspect the worktree afterwards.
+    removeWorktreeOnSuccess: true,
     dataDir: '',
   },
   roles: {
@@ -52,7 +55,7 @@ export const DEFAULTS = Object.freeze({
     failClosed: true,
     autodetect: false,
     commands: [],
-    allowedExecutables: ['npm', 'npx', 'node', 'pnpm', 'yarn', 'tsc', 'pytest', 'python3', 'python', 'cargo', 'go', 'make', 'ruff', 'eslint', 'mypy'],
+    allowedExecutables: ['npm', 'node', 'pnpm', 'yarn', 'tsc', 'pytest', 'python3', 'python', 'cargo', 'go', 'make', 'ruff', 'eslint', 'mypy'],
     timeoutMs: 10 * 60_000,
   },
   billing: {

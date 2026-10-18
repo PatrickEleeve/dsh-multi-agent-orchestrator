@@ -40,6 +40,12 @@ If the Codex CLI reports a usage limit (or is unavailable / unauthenticated / ti
 
 Thorough mode stops before committing and asks you **in the chat**: a question card shows the branch, changed files, verification result, review verdict and findings, with **Approve** / **Reject**. No workflow id and no slash command is needed. If the card cannot be shown (no UI attached), the same gate is reachable from plain language via the `orchestrate` tool (`action: approve|reject`) or `/orchestrate approve` — the id is optional there too: it targets the newest workflow awaiting approval.
 
+## Housekeeping and cost visibility
+
+- **Worktree cleanup**: a completed run removes its isolated worktree (`orchestrator.removeWorktreeOnSuccess: true`, default); the delivered branch and its commits stay in the repository. Set it to `false` to keep the checkout for inspection; a failed removal is recorded as a policy event instead of failing the run.
+- **`/orchestrate budget`** (`orchestrate` action `budget`): aggregates actual paid API spend (always $0), subscription notional list cost, backend call counts, reported tokens, verification runs, review rounds, fix cycles and reviewer fallbacks across every workflow. Tokens a backend does not report stay blank rather than estimated.
+- **Verification argument policy**: the executable allow-list is backed by an argument check — inline evaluation (`node -e/--eval/--print`, `python -c`) and `npx` are refused, so a model-supplied `verify` value cannot turn a permitted interpreter into arbitrary code execution.
+
 ## Limitations
 
 - The Anthropic API backend is not implemented (paid path, disabled by design).

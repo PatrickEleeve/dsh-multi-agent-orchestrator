@@ -162,11 +162,11 @@ export function apply(ctx, rawConfig) {
       ctx.tools.register({
         name: 'orchestrate',
         description:
-          'Run or inspect the multi-model engineering workflow (Claude Code CLI architect → DeepSeek native implementer → deterministic verification → Codex CLI reviewer → repair loop). Work happens on an isolated git worktree branch that is never merged or pushed. action=run starts a background workflow for the current working directory (a git repo); other actions: status, cancel, resume, approve, report, models, test_connections, config.',
+          'Run or inspect the multi-model engineering workflow (Claude Code CLI architect → DeepSeek native implementer → deterministic verification → Codex CLI reviewer → repair loop). Work happens on an isolated git worktree branch that is never merged or pushed. action=run starts a background workflow for the current working directory (a git repo); other actions: status, cancel, resume, approve, report, models, test_connections, config, budget.',
         parameters: {
           type: 'object',
           properties: {
-            action: { type: 'string', enum: ['run', 'status', 'cancel', 'resume', 'approve', 'report', 'models', 'test_connections', 'config'] },
+            action: { type: 'string', enum: ['run', 'status', 'cancel', 'resume', 'approve', 'report', 'models', 'test_connections', 'config', 'budget'] },
             task: { type: 'string', description: 'Development task (action=run).' },
             mode: { type: 'string', enum: ['fast', 'balanced', 'thorough'], description: 'Routing preset; defaults to the configured mode.' },
             verify: { type: 'array', items: { type: 'string' }, description: 'Deterministic verification commands, e.g. ["npm test"]. Executables must be on the configured allow-list.' },
@@ -197,6 +197,7 @@ export function apply(ctx, rawConfig) {
             case 'models': return { text: await ops.models(agent) }
             case 'test_connections': return { text: await ops.testConnections(agent) }
             case 'config': return { text: await ops.config() }
+            case 'budget': return { text: await ops.budget() }
             default: throw new Error(`unknown action ${args.action}`)
           }
         },

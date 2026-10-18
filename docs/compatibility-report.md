@@ -41,4 +41,6 @@ Reviewer fallback: `codex-cli` rate-limit/auth/unavailable/timeout now falls bac
 
 Architecture review model: `roles.architect.critiqueModel` (default `opus`) drives thorough mode's second architecture pass, independent from `roles.architect.model`; live verification pending a thorough run in which `architect:design` and `architect:critique` report different models.
 
+1.7.0 hardening: verification args refuse inline evaluation (`node -e`, `python -c`) and `npx`; persistence writes are serialised per workflow; cancel cannot be raced by resume/approve; completed runs remove their worktree (`removeWorktreeOnSuccess`); `/orchestrate budget` aggregates real spend/usage. All covered by tests (110).
+
 Not verified: DSH-level sandbox restriction of the native child (profile runs danger-full-access; child inherits parent permissions). Mitigation: post-run checks that the original repo is untouched and `.orchestrator/` spec is intact; worktree is not a security sandbox.

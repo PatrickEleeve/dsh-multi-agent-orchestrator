@@ -34,6 +34,20 @@ export function normalizeVerificationCommand(spec, policy) {
   if (NEVER.has(exe)) throw new PolicyError(`executable "${exe}" is never permitted for verification`)
   if (!policy.allowedExecutables.includes(exe)) throw new PolicyError(`executable "${exe}" is not in verification.allowedExecutables`)
   if (command.includes('/') && !path.isAbsolute(command)) throw new PolicyError('relative executable paths are not permitted')
+  // An allow-list of executables is not an execution boundary by itself: these
+  // argument forms turn a permitted interpreter into arbitrary code execution,
+  // and `verify` can be supplied by a model.
+  const evalForms = {
+    node: /^(-e|--eval|--print|-p)(=|$)/,
+    python: /^(-c|--command)(=|$)/,
+    python3: /^(-c|--command)(=|$)/,
+  }
+  const risky = evalForms[exe]
+  if (risky) {
+    const offender = args.find((arg) => risky.test(arg))
+    if (offender) throw new PolicyError(`"${exe} ${offender}" is inline-evaluation and is not permitted for verification; use a script file instead`)
+  }
+  if (exe === 'npx') throw new PolicyError('npx is not permitted for verification (it fetches and runs arbitrary packages)')
   return { name, command, args, timeoutMs }
 }
 

@@ -214,6 +214,13 @@ export async function commitTask(git, wtPath, message) {
   return { committed: true, sha }
 }
 
+/** Remove a completed run's worktree (the delivered branch keeps its commits). */
+export async function removeWorktree(git, repoRoot, wtPath) {
+  const result = await git.exec(repoRoot, ['worktree', 'remove', '--force', wtPath], { allowFail: true })
+  await git.exec(repoRoot, ['worktree', 'prune'], { allowFail: true })
+  return !result.spawnError && result.exitCode === 0
+}
+
 /** True when the original repo is exactly as it was before the workflow. */
 export async function originalUntouched(git, repoRoot, snapshot) {
   const now = await snapshotRepo(git, repoRoot)

@@ -11,12 +11,30 @@ import { isTerminal, transition } from './state-machine.js'
 export class WorkflowStore {
   constructor(dataDir) {
     this.root = path.join(dataDir, 'workflows')
+    /** @type {Map<string, Promise<unknown>>} per-workflow write chain */
+    this.queues = new Map()
   }
   dir(id) {
     if (!/^[a-z0-9-]{4,64}$/.test(id)) throw new Error(`invalid workflow id "${id}"`)
     return path.join(this.root, id)
   }
+  /**
+   * Writes for one workflow are serialised: a fire-and-forget save (e.g. the
+   * recorded child pid) can never land after a newer state write.
+   */
   async save(wf) {
+    const previous = this.queues.get(wf.id) ?? Promise.resolve()
+    const current = previous.then(() => this.#write(wf))
+    const tail = current.catch(() => undefined)
+    this.queues.set(wf.id, tail)
+    try {
+      return await current
+    } finally {
+      if (this.queues.get(wf.id) === tail) this.queues.delete(wf.id)
+    }
+  }
+
+  async #write(wf) {
     const dir = this.dir(wf.id)
     await fs.mkdir(dir, { recursive: true })
     const file = path.join(dir, 'state.json')

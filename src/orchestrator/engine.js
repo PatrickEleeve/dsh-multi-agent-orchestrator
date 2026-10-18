@@ -14,7 +14,7 @@ import { REVIEW_SCHEMA, buildReviewPrompt, parseReview } from '../agents/reviewe
 import { isPathAllowed, normalizeVerificationCommand } from '../security/permissions.js'
 import { runVerification, verificationFingerprint } from '../verification/runner.js'
 import { terminateOrphan } from '../process.js'
-import { collectChanges, commitTask, createWorktree, originalUntouched, restoreInfoExclude, stagedTree } from '../workspace/worktree.js'
+import { collectChanges, commitTask, createWorktree, originalUntouched, removeWorktree, restoreInfoExclude, stagedTree } from '../workspace/worktree.js'
 import { redact } from '../security/redaction.js'
 
 const sha = (text) => createHash('sha256').update(text).digest('hex')
@@ -57,6 +57,8 @@ export class Engine {
     this.observers = new Set()
     /** Slots and ids reserved synchronously before any await (see `claim`). */
     this.claims = new Set()
+    /** Workflows with a cancellation in flight; a resume/approve must not race it. */
+    this.cancelling = new Set()
   }
 
   /** Reserve capacity before the first await; callers must release in `finally`. */
@@ -148,6 +150,7 @@ export class Engine {
     // prompt or command issued at that moment is not refused as "already running".
     const settling = this.live.get(id)
     if (settling) await settling.promise.catch(() => undefined)
+    if (this.cancelling.has(id)) throw new Error(`workflow ${id} is being cancelled; resume after the cancellation settles`)
     const wf = await this.store.load(id)
     if (!wf) throw new Error(`unknown workflow ${id}`)
     if (this.live.has(id)) throw new Error(`workflow ${id} is already running`)
@@ -202,6 +205,15 @@ export class Engine {
   }
 
   async cancel(id) {
+    this.cancelling.add(id)
+    try {
+      return await this.#cancelInner(id)
+    } finally {
+      this.cancelling.delete(id)
+    }
+  }
+
+  async #cancelInner(id) {
     const entry = this.live.get(id)
     if (entry) {
       entry.controller.abort()
@@ -736,6 +748,13 @@ export class Engine {
     const commit = await commitTask(this.git, wf.workspace.path, `orchestrate: ${wf.task.slice(0, 72)}\n\nWorkflow ${wf.id} (${wf.mode}). Not merged; review branch ${wf.workspace.branch}.`)
     wf.delivery = { branch: wf.workspace.branch, worktree: wf.workspace.path, commit: commit.sha, files: changes.files, merged: false, pushed: false }
     await this.move(wf, 'COMPLETED', reason)
+    // The delivered branch keeps every commit; the checkout is disposable.
+    if (this.config.orchestrator.removeWorktreeOnSuccess) {
+      const removed = await removeWorktree(this.git, wf.workspace.repoRoot, wf.workspace.path).catch(() => false)
+      wf.delivery.worktreeRemoved = removed
+      if (!removed) wf.violations.push({ at: new Date().toISOString(), kind: 'worktree_cleanup_failed', detail: `could not remove ${wf.workspace.path}` })
+      await this.persist(wf)
+    }
   }
 
   // --------------------------------------------------------------- reports

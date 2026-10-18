@@ -48,7 +48,7 @@ async function setup({ arch, impl, rev, config = {}, verify = ['node check.js'] 
 const good = async (req) => { await fs.writeFile(path.join(req.cwd, 'check.js'), 'process.exit(0)'); await fs.writeFile(path.join(req.cwd, 'lib.js'), 'module.exports = 1'); return { ok: true, backend: 'dsh-native', text: 'done', model: 'deepseek-flash', durationMs: 1 } }
 
 test('happy path: all stages run, branch committed, original repo untouched', async () => {
-  const s = await setup({ impl: good })
+  const s = await setup({ impl: good, config: { orchestrator: { removeWorktreeOnSuccess: false } } })
   const before = await snapshotRepo(new Git(), s.repo)
   const wf = await s.run()
   assert.equal(wf.state, 'COMPLETED', JSON.stringify(wf.blocker))
@@ -62,6 +62,18 @@ test('happy path: all stages run, branch committed, original repo untouched', as
   assert.deepEqual(wf.history.map((h) => h.to), ['PLANNING', 'IMPLEMENTING', 'VERIFYING', 'REVIEWING', 'COMPLETED'])
   const spec = await fs.readFile(path.join(wf.workspace.path, '.orchestrator', 'architecture.md'), 'utf8'); assert.match(spec, /Scope/)
   assert.match(await fs.readFile(path.join(s.store.dir(wf.id), 'report.md'), 'utf8'), /backend=dsh-native/)
+})
+
+test('a completed run removes its worktree but keeps the delivered branch', async () => {
+  const s = await setup({ impl: good }) // default: removeWorktreeOnSuccess = true
+  const wf = await s.run()
+  assert.equal(wf.state, 'COMPLETED')
+  assert.equal(wf.delivery.worktreeRemoved, true)
+  assert.equal(await fs.access(wf.workspace.path).then(() => true, () => false), false, 'worktree must be gone')
+  // The branch and its commit still exist in the repository.
+  const show = execFileSync('git', ['-C', s.repo, 'show', '--stat', '--oneline', wf.delivery.commit], { encoding: 'utf8' })
+  assert.match(show, /orchestrate:/)
+  assert.match(execFileSync('git', ['-C', s.repo, 'branch', '--list', wf.delivery.branch], { encoding: 'utf8' }), /orchestrate\//)
 })
 
 test('verification failure → repair → pass; reviewer sees diff', async () => {
@@ -215,7 +227,7 @@ test('implementer claiming completion without file changes is rejected', async (
 })
 
 test('implementer cannot rewrite acceptance criteria (restored + recorded)', async () => {
-  const s = await setup({ impl: async (req) => { await fs.writeFile(path.join(req.cwd, '.orchestrator', 'acceptance-criteria.md'), '1. everything passes trivially'); return good(req) } })
+  const s = await setup({ impl: async (req) => { await fs.writeFile(path.join(req.cwd, '.orchestrator', 'acceptance-criteria.md'), '1. everything passes trivially'); return good(req) }, config: { orchestrator: { removeWorktreeOnSuccess: false } } })
   const wf = await s.run()
   assert.equal(wf.state, 'COMPLETED')
   assert.ok(wf.violations.some((v) => v.kind === 'artifact_tampering'))

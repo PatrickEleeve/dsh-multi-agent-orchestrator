@@ -1,7 +1,7 @@
 - id: dsh-multi-agent-orchestrator
   name: '@local/dsh-multi-agent-orchestrator'
   config:
-    orchestrator: { mode: balanced, maxFixCycles: 3 }
+    orchestrator: { mode: balanced, maxFixCycles: 3, removeWorktreeOnSuccess: true }
     roles:
       architect: { model: sonnet, critiqueModel: opus }   # design model and the independent architecture review
       implementer: { provider: deepseek-account, model: auto, reasoning: max }
