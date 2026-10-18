@@ -37,4 +37,6 @@ Target selection: `--repo <path>` / tool field `repo` (absolute, or relative to 
 
 Independent code review of v1.3.3 (Opus 5.5) produced 5 Critical + 8 High findings; all are fixed in 1.4.0 with regression tests (`tests/review-regressions.test.js`) except the lesser items listed in docs/security.md.
 
+Reviewer fallback: `codex-cli` rate-limit/auth/unavailable/timeout now falls back once to the subscribed Claude CLI, recorded in `wf.fallbacks` + stage `reviewer:fallback` + report/notice; `fallbackBackend: 'none'` keeps fail-closed. Unit-tested both ways.
+
 Not verified: DSH-level sandbox restriction of the native child (profile runs danger-full-access; child inherits parent permissions). Mitigation: post-run checks that the original repo is untouched and `.orchestrator/` spec is intact; worktree is not a security sandbox.

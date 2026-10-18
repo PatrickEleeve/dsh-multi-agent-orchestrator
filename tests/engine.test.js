@@ -98,6 +98,43 @@ test('reviewer REQUEST_CHANGES drives a fix cycle, then APPROVE', async () => {
   assert.equal(s.calls.impl.length, 2)
 })
 
+test('a rate-limited reviewer falls back to the Claude CLI and records it', async () => {
+  const reviewJson = JSON.stringify({ verdict: 'APPROVE', summary: 'reviewed via claude fallback', findings: [] })
+  const s = await setup({
+    impl: good,
+    rev: () => ({ ok: false, backend: 'codex-cli', error: { kind: 'rate_limit', message: 'usage limit' }, durationMs: 1 }),
+    arch: async (req) => {
+      if (/INDEPENDENT CODE REVIEWER/.test(req.prompt)) return { ok: true, backend: 'claude-cli', text: reviewJson, model: 'claude-opus-5-5', modelVerified: true, durationMs: 1 }
+      return { ok: true, backend: 'claude-cli', text: archText(), model: 'claude-sonnet-5-5', modelVerified: true, durationMs: 1 }
+    },
+  })
+  const wf = await s.run()
+  assert.equal(wf.state, 'COMPLETED', JSON.stringify(wf.blocker))
+  assert.equal(wf.review.verdict, 'APPROVE')
+  assert.equal(wf.reviews[0].backend, 'claude-cli')
+  assert.equal(wf.fallbacks.length, 1)
+  assert.equal(wf.fallbacks[0].from, 'codex-cli')
+  assert.equal(wf.fallbacks[0].to, 'claude-cli')
+  assert.equal(wf.fallbacks[0].reason, 'rate_limit')
+  assert.ok(wf.stages.some((stage) => stage.role === 'reviewer' && !stage.ok && stage.error.kind === 'rate_limit'))
+  assert.ok(wf.stages.some((stage) => stage.role === 'reviewer:fallback' && stage.ok && stage.backend === 'claude-cli'))
+  const report = await fs.readFile(path.join(s.store.dir(wf.id), 'report.md'), 'utf8')
+  assert.match(report, /Reviewer fallbacks/)
+  assert.match(report, /codex-cli → claude-cli \(rate_limit\)|Reviewer fallbacks/)
+})
+
+test('with the fallback disabled a rate-limited reviewer still blocks', async () => {
+  const s = await setup({
+    impl: good,
+    rev: () => ({ ok: false, backend: 'codex-cli', error: { kind: 'rate_limit', message: 'usage limit' }, durationMs: 1 }),
+    config: { roles: { reviewer: { fallbackBackend: 'none' } } },
+  })
+  const wf = await s.run()
+  assert.equal(wf.state, 'BLOCKED')
+  assert.equal(wf.blocker.kind, 'rate_limit')
+  assert.equal(wf.fallbacks, undefined)
+})
+
 test('malformed reviewer output never approves', async () => {
   const s = await setup({ impl: good, rev: () => ({ ok: true, backend: 'codex-cli', text: 'LGTM!' }) })
   const wf = await s.run()

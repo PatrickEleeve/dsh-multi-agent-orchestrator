@@ -618,11 +618,42 @@ export class Engine {
     let review
     let parseError
     for (let attempt = 0; attempt < 2 && !review; attempt++) {
-      const result = await this.callBackend(wf, 'reviewer', 'codex-cli', (extra) =>
+      const request = {
+        prompt: parseError ? `${prompt}\n\nYour previous reply was rejected: ${parseError}. Reply with only the JSON object.` : prompt,
+        cwd: wf.workspace.path,
+        runId: `${wf.id}-review-${wf.reviews.length}-${attempt}`,
+      }
+      const byCodex = () => this.callBackend(wf, 'reviewer', 'codex-cli', (extra) =>
         this.backends.reviewer.execute(
-          { prompt: parseError ? `${prompt}\n\nYour previous reply was rejected: ${parseError}. Reply with only the JSON object.` : prompt, cwd: wf.workspace.path, outputSchema: REVIEW_SCHEMA, runId: `${wf.id}-review-${wf.reviews.length}-${attempt}` },
+          { ...request, outputSchema: REVIEW_SCHEMA },
           { model: this.config.roles.reviewer.model, timeoutMs: this.config.roles.reviewer.timeoutMs, signal, scratchDir: this.store.dir(wf.id), ...extra },
         ), signal)
+      let result
+      try {
+        result = await byCodex()
+      } catch (error) {
+        // Only an unavailable/rate-limited reviewer falls back, only to the
+        // explicitly configured subscription Claude CLI, and only once.
+        const eligible = error instanceof Halt && error.kind === 'blocked'
+          && ['rate_limit', 'unavailable', 'auth', 'timeout'].includes(error.blockKind)
+          && this.config.roles.reviewer.fallbackBackend === 'claude-cli'
+        const alreadyFellBack = (wf.fallbacks ?? []).some((entry) => entry.role === 'reviewer')
+        if (!eligible || alreadyFellBack) throw error
+        wf.fallbacks = [...(wf.fallbacks ?? []), {
+          at: new Date().toISOString(),
+          role: 'reviewer',
+          from: 'codex-cli',
+          to: 'claude-cli',
+          reason: error.blockKind,
+          model: this.config.roles.reviewer.fallbackModel,
+        }]
+        await this.persist(wf)
+        result = await this.callBackend(wf, 'reviewer:fallback', 'claude-cli', (extra) =>
+          this.backends.architect.execute(
+            { ...request, runId: `${request.runId}-fallback` },
+            { model: this.config.roles.reviewer.fallbackModel, timeoutMs: this.config.roles.reviewer.timeoutMs, signal, permissionMode: 'plan', ...extra },
+          ), signal)
+      }
       const parsed = parseReview(result.text)
       if (parsed.ok) review = parsed.review
       else parseError = parsed.error
@@ -636,7 +667,11 @@ export class Engine {
       throw this.block('isolation_violation', 'The worktree changed during the read-only review; failing closed.')
     }
     wf.review = review
-    wf.reviews.push({ at: new Date().toISOString(), ...review })
+    wf.reviews.push({
+      at: new Date().toISOString(),
+      ...review,
+      backend: (wf.fallbacks ?? []).some((entry) => entry.role === 'reviewer') ? 'claude-cli' : 'codex-cli',
+    })
     await this.persist(wf)
     if (review.verdict === 'BLOCKED') throw this.block('review_blocked', `Reviewer reported BLOCKED: ${review.summary}`)
     if (review.verdict === 'REQUEST_CHANGES') {
@@ -750,6 +785,9 @@ export function renderReport(wf) {
     '## Reviews',
     ...wf.reviews.flatMap((r, i) => [`- round ${i + 1}: ${r.verdict} — ${r.summary}`, ...r.findings.map((f) => `  - [${f.severity}] ${f.file ?? '-'}:${f.line ?? '-'} ${f.description}`)]),
     '',
+    '## Reviewer fallbacks',
+    ...((wf.fallbacks ?? []).length ? wf.fallbacks.map((entry) => `- ${entry.at} ${entry.role}: ${entry.from} → ${entry.to} (${entry.reason}${entry.model ? `, model ${entry.model}` : ''}) — primary backend unavailable, not a silent substitution`) : ['- none']),
+    '',
     '## Policy events',
     ...(wf.violations.length ? wf.violations.map((v) => `- ${v.at} ${v.kind}: ${v.detail}`) : ['- none']),
     '',
@@ -787,6 +825,7 @@ export function describe(wf) {
     `  verification: ${wf.verification?.status ?? 'not run'}   review: ${wf.review?.verdict ?? 'n/a'}   retries: ${wf.fixCycles}/${wf.config.maxFixCycles}${wf.escalations ? ` escalations=${wf.escalations}` : ''}`,
     wf.review?.findings?.length ? `  open findings: ${wf.review.findings.map((f) => `[${f.severity}] ${f.description}`.slice(0, 90)).join(' | ')}` : '',
     wf.blocker ? `  BLOCKER (${wf.blocker.kind}): ${wf.blocker.message}` : '',
+    (wf.fallbacks ?? []).length ? `  fallback: ${wf.fallbacks.map((entry) => `${entry.from}→${entry.to} (${entry.reason})`).join(', ')}` : '',
     wf.blocker?.kind === 'awaiting_approval' ? '  NEXT: approve — click the approval card in the chat or say "approve"; the workflow id is optional' : '',
     wf.state === 'BLOCKED' && wf.blocker?.kind !== 'awaiting_approval' ? '  NEXT: resolve the blocker, then "/orchestrate resume" (id optional)' : '',
     wf.delivery ? `  delivered: branch ${wf.delivery.branch} commit ${wf.delivery.commit?.slice(0, 10)} (not merged/pushed)\n  worktree: ${wf.delivery.worktree}` : '',

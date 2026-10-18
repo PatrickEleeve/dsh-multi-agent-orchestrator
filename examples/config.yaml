@@ -5,6 +5,6 @@
     roles:
       architect: { model: opus }
       implementer: { provider: deepseek-account, model: auto, reasoning: max }
-      reviewer: { model: default }   # or gpt-6-astra / gpt-6-sol (from /orchestrate models)
+      reviewer: { model: default, fallbackBackend: claude-cli, fallbackModel: opus }   # model: gpt-6-astra / gpt-6-sol; fallbackBackend: none disables the Claude fallback
     verification: { commands: ["npm test"] }
     # security: { allowedPaths: ["src", "test"] }   # optional: restrict which repo paths may change

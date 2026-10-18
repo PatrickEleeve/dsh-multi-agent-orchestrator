@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-multi-agent-orchestrator",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "private": true,
   "type": "module",
   "description": "Multi-model coding orchestrator: Claude Code CLI architect, DeepSeek native implementer, deterministic verification, Codex CLI reviewer.",

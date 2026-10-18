@@ -35,6 +35,11 @@ export const DEFAULTS = Object.freeze({
       model: 'default',
       sandbox: 'read-only',
       timeoutMs: 15 * 60_000,
+      // When Codex is rate-limited or unavailable, review with the Claude CLI
+      // (subscription login) instead of blocking. Recorded and reported, never
+      // silent; 'none' keeps the strict fail-closed behaviour.
+      fallbackBackend: 'claude-cli',
+      fallbackModel: 'opus',
     },
   },
   verification: {
@@ -101,6 +106,8 @@ export function resolveConfig(raw = {}) {
   if (r.reviewer.backend !== 'codex-cli') errors.push('roles.reviewer.backend must be codex-cli')
   if (r.architect.permissionMode !== 'plan') errors.push('roles.architect.permissionMode must be plan (read-only)')
   if (r.reviewer.sandbox !== 'read-only') errors.push('roles.reviewer.sandbox must be read-only')
+  if (!['claude-cli', 'none'].includes(r.reviewer.fallbackBackend)) errors.push("roles.reviewer.fallbackBackend must be 'claude-cli' or 'none' (the paid API backend cannot be a fallback)")
+  if (typeof r.reviewer.fallbackModel !== 'string' || r.reviewer.fallbackModel.trim() === '') errors.push('roles.reviewer.fallbackModel must be a non-empty string')
   for (const [name, role] of Object.entries(r)) {
     if (typeof role.model !== 'string' || role.model.trim() === '') errors.push(`roles.${name}.model must be a non-empty string`)
     if (!Number.isFinite(role.timeoutMs) || role.timeoutMs < 1000) errors.push(`roles.${name}.timeoutMs must be >= 1000`)

@@ -32,6 +32,7 @@ export function renderWorkflowNotice(wf) {
     lines.push(`Worktree: ${wf.delivery.worktree}`)
   }
   lines.push(stats)
+  if ((wf.fallbacks ?? []).length) lines.push(`Reviewer fallback: ${wf.fallbacks.map((entry) => `${entry.from}→${entry.to} (${entry.reason})`).join(', ')} — primary backend was unavailable; this is recorded, not silent.`)
   if (wf.blocker) lines.push(`Blocker (${wf.blocker.kind}): ${wf.blocker.message}`)
   if (wf.state === 'COMPLETED') lines.push('Say "merge"/"push" explicitly if you want more: the orchestrator never does either automatically.')
   return redact(lines.join('\n'))

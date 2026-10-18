@@ -12,6 +12,7 @@ Threats considered: prompt injection inside repository content or model output, 
 |---|---|---|
 | Credential isolation | Child env is built from `process.env` minus every `*API_KEY`, `*AUTH_TOKEN`, `*SECRET`, `*PASSWORD`, `PRIVATE_KEY`, `*SESSION_COOKIE` | `security/redaction.js#sanitizedEnv` |
 | No credential file access | The orchestrator never opens `~/.codex/auth.json`, keychains or DSH credential stores; auth is only observed through `claude auth status` / `codex login status` | `backends/*` |
+| Reviewer fallback | On rate limit / unavailability the review may fall back to the Claude CLI **subscription** login only; it is recorded in `wf.fallbacks`, the stage table and the report, never twice, never to the paid API (`fallbackBackend: 'none'` disables it) | `engine.js#stageReview`, `config.js` |
 | No unintended paid billing | Claude runs are rejected when `apiKeySource !== "none"`; both CLIs are refused when their login mode is API-key based; `maxAutomaticApiSpendUSD` must be 0 at config load | `security/permissions.js#billingDecision`, `backends/claude-cli.js` |
 | Read-only planning/review | Claude `--permission-mode plan --tools Read,Glob,Grep --strict-mcp-config --disable-slash-commands`; Codex `--sandbox read-only --ephemeral` | `backends/claude-cli.js`, `backends/codex-cli.js` |
 | Path policy | `security.allowedPaths` (repository-relative prefixes) is enforced on the changed-file list after implementation and again before commit; changes outside it fail closed | `engine.js#enforceAllowedPaths` |
