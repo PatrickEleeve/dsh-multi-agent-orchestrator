@@ -10,7 +10,7 @@ import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { Engine } from '../src/orchestrator/engine.js'
 import { WorkflowStore } from '../src/orchestrator/persistence.js'
-import { Git, createWorktree, stageChanges, commitTask, snapshotRepo } from '../src/workspace/worktree.js'
+import { Git, createWorktree, stageChanges, commitTask, snapshotRepo, restoreInfoExclude } from '../src/workspace/worktree.js'
 import { resolveConfig } from '../src/config.js'
 import { runProcess } from '../src/process.js'
 import { ARTIFACT_FILES } from '../src/agents/architect.js'
@@ -162,4 +162,21 @@ test('runProcess settles even when a grandchild keeps stdout open', async () => 
   })
   assert.ok(Date.now() - started < 10_000, 'must not wait for the orphaned grandchild')
   assert.ok(result.exitCode === 0 || result.timedOut, JSON.stringify(result))
+})
+
+
+test('restoreInfoExclude refuses to write through a symlinked .git/info', async () => {
+  const repoDir = await repo()
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'orch-sym-'))
+  const snapshot = await snapshotRepo(new Git(), repoDir)
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'orch-outside-'))
+  const victim = path.join(outside, 'exclude')
+  await fs.writeFile(victim, 'untouched\n')
+  const infoDir = path.join(repoDir, '.git', 'info')
+  await fs.rm(infoDir, { recursive: true, force: true })
+  await fs.symlink(outside, infoDir, 'dir')
+  const restored = await restoreInfoExclude(snapshot)
+  assert.equal(restored, false, 'must refuse a symlinked info directory')
+  assert.equal(await fs.readFile(victim, 'utf8'), 'untouched\n', 'nothing outside the repo may be overwritten')
+  await dataDir
 })

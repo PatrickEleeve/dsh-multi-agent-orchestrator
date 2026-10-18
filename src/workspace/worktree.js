@@ -97,11 +97,30 @@ export function publicSnapshot(snapshot) {
   return { head, status, branch, dirty, gitCommonDir, infoExcludeHash, configHash, hooksHash }
 }
 
-/** Restore `info/exclude` to the snapshotted bytes (patterns only, never secrets). */
+/**
+ * Restore `info/exclude` to the snapshotted bytes (patterns only, never secrets).
+ * Every path in the chain must be a real directory/file: a symlinked `.git`,
+ * `.git/info` or `info/exclude` would write outside the repository, which is the
+ * one thing this guard exists to prevent.
+ */
 export async function restoreInfoExclude(snapshot) {
   if (typeof snapshot.infoExclude !== 'string' || typeof snapshot.gitCommonDir !== 'string') return false
-  await fs.mkdir(path.join(snapshot.gitCommonDir, 'info'), { recursive: true })
-  await fs.writeFile(path.join(snapshot.gitCommonDir, 'info', 'exclude'), snapshot.infoExclude)
+  const realDir = async (target) => {
+    const stat = await fs.lstat(target).catch(() => null)
+    return stat !== null && stat.isDirectory() && !stat.isSymbolicLink()
+  }
+  if (!(await realDir(snapshot.gitCommonDir))) return false
+  const infoDir = path.join(snapshot.gitCommonDir, 'info')
+  const infoStat = await fs.lstat(infoDir).catch(() => null)
+  if (infoStat === null) await fs.mkdir(infoDir, { recursive: true })
+  else if (!(await realDir(infoDir))) return false
+  const excludePath = path.join(infoDir, 'exclude')
+  const excludeStat = await fs.lstat(excludePath).catch(() => null)
+  if (excludeStat !== null) {
+    if (!excludeStat.isFile() || excludeStat.isSymbolicLink()) return false
+    await fs.unlink(excludePath)
+  }
+  await fs.writeFile(excludePath, snapshot.infoExclude, { flag: 'wx' })
   return true
 }
 
