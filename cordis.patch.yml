@@ -1,0 +1,10 @@
+# Orchestrator bundle layer. All keys are optional; see examples/config.yaml.
+# Hard invariants (rejected at load if changed): no autoMerge/autoPush, no paid API fallback,
+# no silent backend switch, read-only architect/reviewer.
+- insert:
+    - id: dsh-multi-agent-orchestrator
+      name: '@local/dsh-multi-agent-orchestrator'
+      config:
+        orchestrator:
+          mode: balanced
+          maxFixCycles: 3

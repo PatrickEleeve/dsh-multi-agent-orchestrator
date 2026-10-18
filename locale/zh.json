@@ -1,0 +1,1 @@
+{ "meta": { "title": "多模型协作编排器", "description": "/orchestrate：Claude Code CLI 架构师 → DeepSeek 原生实现者 → 确定性验证 → Codex CLI 独立评审，运行在隔离的 git worktree 上。订阅优先，绝不自动切换到付费 API。" } }

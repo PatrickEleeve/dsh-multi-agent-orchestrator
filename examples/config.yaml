@@ -1,0 +1,10 @@
+- id: dsh-multi-agent-orchestrator
+  name: '@local/dsh-multi-agent-orchestrator'
+  config:
+    orchestrator: { mode: balanced, maxFixCycles: 3 }
+    roles:
+      architect: { model: opus }
+      implementer: { provider: deepseek-account, model: auto, reasoning: max }
+      reviewer: { model: default }   # or gpt-6-astra / gpt-6-sol (from /orchestrate models)
+    verification: { commands: ["npm test"] }
+    # security: { allowedPaths: ["src", "test"] }   # optional: restrict which repo paths may change
