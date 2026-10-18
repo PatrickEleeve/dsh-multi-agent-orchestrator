@@ -36,7 +36,10 @@ export function redactDeep(value) {
   return value
 }
 
-const ENV_DENY = /(API_KEY|APIKEY|AUTH_TOKEN|ACCESS_TOKEN|SECRET|PASSWORD|PRIVATE_KEY|SESSION_COOKIE)$/i
+// Deny by shape, not by a lucky suffix: TOKEN/KEY/SECRET/PASSWORD anywhere in
+// the name, plus the well-known credential DB URLs and AWS variables.
+const ENV_DENY =
+  /(^|_)(API_?KEY|APIKEY|AUTH|TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_KEY|CREDENTIAL|CREDENTIALS|SESSION_COOKIE|ACCESS_KEY)(_|$)|DATABASE_URL|(^|_)AWS_(SECRET|SESSION|ACCESS)|^(GITHUB|GH|NPM|HF|HUGGINGFACE|OPENAI|ANTHROPIC|GOOGLE|AZURE)_(TOKEN|KEY)$/i
 
 /**
  * Environment for child processes: the parent env minus every credential-like

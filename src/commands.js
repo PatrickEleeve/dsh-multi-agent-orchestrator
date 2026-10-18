@@ -51,10 +51,10 @@ export function parseOrchestrateInput(rawInput) {
   return out
 }
 
-export const HELP = `/orchestrate <development task> [--mode fast|balanced|thorough] [--verify "npm test"]... [--review|--no-review]
+export const HELP = `/orchestrate <development task> [--mode fast|balanced|thorough] [--repo /path/to/repo] [--verify "npm test"]... [--review|--no-review]
 /orchestrate status [workflow-id]
 /orchestrate cancel <workflow-id>
-/orchestrate resume <workflow-id>
+/orchestrate resume [workflow-id] [--verify "npm test"]...
 /orchestrate approve <workflow-id>     (thorough mode human gate)
 /orchestrate report <workflow-id>
 /orchestrate models

@@ -69,7 +69,9 @@ export function attachWorkflowJob({ jobs, engine, wf, sessionId }) {
           /* panel-only */
         }
       }
-      if (TERMINAL.has(next.state)) finish()
+      // The approval gate is not the end of the work: keep the job live.
+      const awaitingGate = next.state === 'BLOCKED' && next.blocker?.kind === 'awaiting_approval'
+      if (TERMINAL.has(next.state) && !awaitingGate) finish()
     })
     return jobs.start({
       kind: 'orchestrate',

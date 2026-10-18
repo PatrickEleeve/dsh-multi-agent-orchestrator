@@ -101,7 +101,14 @@ export function registerRoutes(ctx, { store, engine, log }) {
     path: ROUTE_PREFIX,
     handler: async (req, res) => {
       try {
-        const rejection = connectionOf()?.requestRejection?.(req)
+        const connection = connectionOf()
+        if (!connection || typeof connection.requestRejection !== 'function') {
+          // No fence means no way to prove this is the local GUI: refuse instead
+          // of silently serving a privileged endpoint.
+          sendJson(res, 503, { ok: false, error: { code: 'fence_unavailable', message: 'the connection trust fence is unavailable; the panel API refuses to serve' } })
+          return
+        }
+        const rejection = connection.requestRejection(req)
         if (rejection !== undefined && rejection !== false) {
           sendJson(res, typeof rejection === 'number' ? rejection : 403, { ok: false, error: { code: 'forbidden', message: 'request rejected by the connection trust fence' } })
           return
@@ -132,6 +139,11 @@ export function registerRoutes(ctx, { store, engine, log }) {
           return
         }
         if (method === 'POST' && sub === '/action') {
+          // A cross-site form can only send text/plain, urlencoded or multipart.
+          if (!String(req.headers?.['content-type'] ?? '').toLowerCase().startsWith('application/json')) {
+            sendJson(res, 415, { ok: false, error: { code: 'unsupported_media_type', message: 'POST /action requires content-type: application/json' } })
+            return
+          }
           const body = await readJsonBody(req)
           const id = typeof body.id === 'string' ? body.id : ''
           const action = typeof body.action === 'string' ? body.action : ''

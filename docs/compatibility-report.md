@@ -35,4 +35,6 @@ No-verification blocks are recoverable without editing config: `resume` accepts 
 
 Target selection: `--repo <path>` / tool field `repo` (absolute, or relative to the chat directory) overrides the session working directory; a non-git path is rejected before a workflow is created. Covered by command-grammar, engine and ops tests.
 
+Independent code review of v1.3.3 (Opus 5.5) produced 5 Critical + 8 High findings; all are fixed in 1.4.0 with regression tests (`tests/review-regressions.test.js`) except the lesser items listed in docs/security.md.
+
 Not verified: DSH-level sandbox restriction of the native child (profile runs danger-full-access; child inherits parent permissions). Mitigation: post-run checks that the original repo is untouched and `.orchestrator/` spec is intact; worktree is not a security sandbox.

@@ -67,7 +67,12 @@ export class CodexCLIBackend {
       if (!decision.allowed) return fail('billing', decision.reason, started)
 
       const lastMessage = path.join(scratch, 'last-message.txt')
-      const args = ['exec', '--sandbox', 'read-only', '--json', '--ephemeral', '--skip-git-repo-check', '--output-last-message', lastMessage, '-C', request.cwd]
+      const args = [
+        'exec', '--sandbox', 'read-only', '--json', '--ephemeral', '--skip-git-repo-check',
+        // Ignore implementer-authored AGENTS.md/project docs.
+        '-c', 'project_doc_max_bytes=0',
+        '--output-last-message', lastMessage, '-C', request.cwd,
+      ]
       if (options.model && options.model !== 'default') args.push('-m', options.model)
       if (request.outputSchema) {
         const schemaPath = path.join(scratch, 'schema.json')

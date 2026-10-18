@@ -57,6 +57,9 @@ export class ClaudeCLIBackend {
       '--verbose',
       '--tools', 'Read,Glob,Grep',
       '--strict-mcp-config',
+      // Only the user's own settings: project files (CLAUDE.md, .claude/settings.json
+      // hooks) are written by the implementer and must not steer the Architect.
+      '--setting-sources', 'user',
       '--disable-slash-commands',
       '--no-session-persistence',
       ...(effort ? ['--effort', effort] : []),

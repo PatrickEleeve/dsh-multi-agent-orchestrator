@@ -24,6 +24,28 @@ Threats considered: prompt injection inside repository content or model output, 
 | Destructive git | The plugin only runs `worktree add`, `add`, `diff`, `commit` on a dedicated branch; `autoMerge`/`autoPush` are rejected at config load; nothing pushes or merges | `workspace/worktree.js`, `config.js` |
 | Log secrecy | All persisted state, reports and captured output pass through `redact()` | `security/redaction.js` |
 
+## Hardening from the independent code review (1.4.0)
+
+An Opus 5.5 review of v1.3.3 reproduced these defects; each is now fixed and covered by `tests/review-regressions.test.js`:
+
+| Defect | Fix |
+|---|---|
+| Two drivers could run one workflow concurrently (`resume`/`approve` checked liveness after an `await`; `launch` replaced entries) | Synchronous operation claims (`Engine.claim`) before any await, `launch` refuses a live id, two parallel `start` calls cannot pass the slot check |
+| A file literally named `*` made `git add` stage `.orchestrator/` into the delivered commit | `GIT_LITERAL_PATHSPECS=1` for every git call, `--no-renames`, and a post-add assertion that refuses staged scaffolding |
+| Planted `.git/hooks/pre-commit` executed at delivery | Commits use `core.hooksPath=/dev/null --no-verify`; the hooks directory is fingerprinted in the original-repo snapshot |
+| Thorough mode committed whatever was in the worktree after approval | The reviewer signs a staged **tree hash**; review-time, post-review and pre-commit trees must match |
+| Implementer-authored `CLAUDE.md`/`AGENTS.md`/`.claude/`/`.codex/` could steer the Architect or Reviewer | Those paths block the workflow; the reviewer prompt fences the file list; Claude runs with `--setting-sources user`, Codex with `project_doc_max_bytes=0` |
+| `BLOCKED → CREATED` was illegal, so a run blocked before its worktree existed could never resume | Transition allowed; the driver re-prepares the workspace |
+| `runProcess` waited for `close`, so a grandchild holding stdout hung the run | Settles on `exit` after a 500 ms grace and destroys the pipes after SIGKILL |
+| `ENV_DENY` leaked `GITHUB_TOKEN`, `AWS_SECRET_ACCESS_KEY`, `DATABASE_URL`, … to verification commands | Deny-by-shape regex covering TOKEN/KEY/SECRET/PASSWORD/CREDENTIAL/AWS/DATABASE_URL |
+| `--name-only` followed renames, hiding deletions from `allowedPaths` | `--no-renames` on status and diffs |
+| Symlinked `.orchestrator/*` or README made the orchestrator write/read outside the worktree | Writes unlink symlinks first and use `flag: 'wx'`; the README read refuses symlinks |
+| Panel API served privileges when the trust fence was absent; `text/plain` POST could act | Missing fence → 503, POST requires `application/json` |
+| Driver rejection could go unhandled and kill the Host | `launch` attaches `.catch` before `.finally` |
+| Snapshot never refreshed, so an isolation block stayed blocked forever | Resuming an isolation block re-snapshots the original repo |
+
+Remaining known gaps from that review (not yet fixed): per-backend abort listeners are not removed; `persist` writes are not serialised (an `onPid` save can land after a newer one); error-classification regexes are coarse; some config flags (`persistState`, `approvalFor*`, `credentialRedaction`) are accepted but unused; the panel has no resume button.
+
 ## Robustness rule learned the hard way
 
 `ctx.userQuestions` is read only through the optional `ctx.get('userQuestions')` accessor inside a `try/catch`; reading the property directly without declaring it in `inject` throws, and an unhandled rejection from a background workflow callback terminates the Host (observed once as `dsh: fatal load failure`). Every background path added by this plugin (workflow driver, approval prompt, pending-approval lookup) therefore catches its own errors and never rejects into the engine.

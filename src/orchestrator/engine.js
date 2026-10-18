@@ -14,10 +14,20 @@ import { REVIEW_SCHEMA, buildReviewPrompt, parseReview } from '../agents/reviewe
 import { isPathAllowed, normalizeVerificationCommand } from '../security/permissions.js'
 import { runVerification, verificationFingerprint } from '../verification/runner.js'
 import { terminateOrphan } from '../process.js'
-import { collectChanges, commitTask, createWorktree, originalUntouched, restoreInfoExclude } from '../workspace/worktree.js'
+import { collectChanges, commitTask, createWorktree, originalUntouched, restoreInfoExclude, stagedTree } from '../workspace/worktree.js'
 import { redact } from '../security/redaction.js'
 
 const sha = (text) => createHash('sha256').update(text).digest('hex')
+
+/** Write a file in the worktree without ever following a symlink there. */
+async function writeNoFollow(file, content) {
+  const stat = await fs.lstat(file).catch(() => null)
+  if (stat) {
+    if (stat.isDirectory()) throw new Error(`refusing to overwrite directory ${file}`)
+    await fs.unlink(file) // removes a symlink itself, not its target
+  }
+  await fs.writeFile(file, content, { flag: 'wx' })
+}
 const BLOCKING_KINDS = new Set(['auth', 'rate_limit', 'billing', 'unavailable', 'timeout'])
 const MAX_STAGE_RETRIES = 1
 
@@ -45,6 +55,25 @@ export class Engine {
     this.parents = new Map()
     /** External observers (Jobs bridge, UI hooks); they never affect the workflow. */
     this.observers = new Set()
+    /** Slots and ids reserved synchronously before any await (see `claim`). */
+    this.claims = new Set()
+  }
+
+  /** Reserve capacity before the first await; callers must release in `finally`. */
+  claim(key) {
+    const limit = this.config.orchestrator.maxParallelWorkers
+    if (key !== null) {
+      // Only a concurrent *operation* is rejected here; whether the workflow is
+      // live is checked after its (possibly unwinding) driver has settled.
+      if (this.claims.has(key)) throw new Error(`workflow "${key}" is already being started, resumed or approved`)
+      this.claims.add(key)
+      return () => this.claims.delete(key)
+    }
+    // A fresh run must not exceed the worker slots, counting in-flight operations.
+    if (this.live.size + this.claims.size >= limit) throw new Error(`a workflow is already running (maxParallelWorkers=${limit}); wait for it or cancel it`)
+    const token = Symbol('start')
+    this.claims.add(token)
+    return () => this.claims.delete(token)
   }
 
   isLive(id) {
@@ -53,14 +82,15 @@ export class Engine {
 
   /** Create + persist a workflow, then drive it in the background. */
   async start({ task, repo, parent, mode, verify, review }) {
+    // Reserve the single worker slot BEFORE any await: two parallel starts must
+    // not both pass the limit check.
+    const release = this.claim(null)
+    try {
     // Fail here, synchronously for the caller, instead of letting the driver
     // discover it later: "not a git repository" is a user error, not a workflow.
     const probe = await this.git.exec(repo, ['rev-parse', '--show-toplevel'], { allowFail: true })
     if (probe.spawnError || probe.exitCode !== 0) {
       throw new Error(`"${repo}" is not a git repository. The orchestrator isolates every run in a git worktree, so the target must be a repository (pass repo="/path/to/repo" or change the chat's working directory).`)
-    }
-    if (this.live.size >= this.config.orchestrator.maxParallelWorkers) {
-      throw new Error(`a workflow is already running (maxParallelWorkers=${this.config.orchestrator.maxParallelWorkers}); wait for it or cancel it`)
     }
     const effectiveMode = mode ?? this.config.orchestrator.mode
     const route = routeFor(effectiveMode, { review })
@@ -103,10 +133,17 @@ export class Engine {
     await this.persist(wf)
     this.launch(wf, parent)
     return wf
+    } finally {
+      release()
+    }
   }
 
   /** Resume a BLOCKED workflow from the stage it was blocked in. */
   async resume(id, parent, options = {}) {
+    // Synchronous claim first: a second resume/approve for the same id is
+    // rejected before it can await and then win the race.
+    const release = options.claimHeld === true ? () => undefined : this.claim(id)
+    try {
     // A driver that has just blocked may still be unwinding; let it settle so a
     // prompt or command issued at that moment is not refused as "already running".
     const settling = this.live.get(id)
@@ -115,7 +152,6 @@ export class Engine {
     if (!wf) throw new Error(`unknown workflow ${id}`)
     if (this.live.has(id)) throw new Error(`workflow ${id} is already running`)
     if (wf.state !== 'BLOCKED') throw new Error(`workflow ${id} is ${wf.state}; only BLOCKED workflows can be resumed`)
-    if (this.live.size >= this.config.orchestrator.maxParallelWorkers) throw new Error('another workflow is running')
     // A workflow blocked for missing verification is fixed by supplying the
     // commands, not by editing the plugin config: validate them exactly like
     // the ones a fresh run receives.
@@ -124,25 +160,45 @@ export class Engine {
       wf.verifySpecs = options.verify
       if (wf.blocker?.kind === 'no_verification') wf.blocker = null
     }
+    // The user was told to inspect their repository; their fix is the new baseline.
+    if (wf.blocker?.kind === 'isolation_violation' && wf.workspace?.repoRoot) {
+      const { snapshotRepo } = await import('../workspace/worktree.js')
+      const fresh = await snapshotRepo(this.git, wf.workspace.repoRoot)
+      wf.originalSnapshot = {
+        head: fresh.head, status: fresh.status, branch: fresh.branch, dirty: fresh.dirty,
+        gitCommonDir: fresh.gitCommonDir, infoExcludeHash: fresh.infoExcludeHash,
+        configHash: fresh.configHash, hooksHash: fresh.hooksHash,
+      }
+      await fs.writeFile(this.snapshotFile(wf), JSON.stringify(fresh), { mode: 0o600 }).catch(() => undefined)
+    }
     wf.humanInterventions += 1
     wf.blocker = null
     transition(wf, wf.blockedFrom ?? 'PLANNING', 'resumed by user')
     await this.persist(wf)
     this.launch(wf, parent)
     return wf
+    } finally {
+      release()
+    }
   }
 
   /** Human approval gate (thorough mode) before the task branch is committed. */
   async approve(id, parent) {
-    const settling = this.live.get(id)
-    if (settling) await settling.promise.catch(() => undefined)
-    const wf = await this.store.load(id)
-    if (!wf) throw new Error(`unknown workflow ${id}`)
-    if (!wf.awaitingApproval) throw new Error(`workflow ${id} is not awaiting approval`)
-    wf.approved = true
-    wf.awaitingApproval = false
-    await this.persist(wf)
-    return this.resume(id, parent).then(() => this.store.load(id))
+    const release = this.claim(id)
+    try {
+      const settling = this.live.get(id)
+      if (settling) await settling.promise.catch(() => undefined)
+      const wf = await this.store.load(id)
+      if (!wf) throw new Error(`unknown workflow ${id}`)
+      if (!wf.awaitingApproval) throw new Error(`workflow ${id} is not awaiting approval`)
+      wf.approved = true
+      wf.awaitingApproval = false
+      await this.persist(wf)
+      await this.resume(id, parent, { claimHeld: true })
+      return this.store.load(id)
+    } finally {
+      release()
+    }
   }
 
   async cancel(id) {
@@ -166,14 +222,17 @@ export class Engine {
   }
 
   launch(wf, parent) {
+    if (this.live.has(wf.id)) throw new Error(`workflow "${wf.id}" is already running`)
     const controller = new AbortController()
     const entry = { controller, parent, promise: Promise.resolve() }
     if (parent) this.parents.set(wf.id, parent)
     else this.parents.delete(wf.id)
-    entry.promise = this.drive(wf, entry).finally(() => {
-      this.live.delete(wf.id)
-      if (isTerminal(wf)) this.parents.delete(wf.id)
-    })
+    entry.promise = this.drive(wf, entry)
+      .catch(() => undefined) // drive() already records its own failure; never reject unhandled
+      .finally(() => {
+        this.live.delete(wf.id)
+        if (isTerminal(wf)) this.parents.delete(wf.id)
+      })
     this.live.set(wf.id, entry)
   }
 
@@ -301,7 +360,7 @@ export class Engine {
     await fs.mkdir(dest, { recursive: true })
     for (const name of ARTIFACT_FILES) {
       const body = await fs.readFile(path.join(this.artifactDir(wf), name), 'utf8').catch(() => null)
-      if (body !== null) await fs.writeFile(path.join(dest, name), body)
+      if (body !== null) await writeNoFollow(path.join(dest, name), body)
     }
   }
 
@@ -315,7 +374,7 @@ export class Engine {
         wf.violations.push({ at: new Date().toISOString(), kind: 'artifact_tampering', detail: `${name} was modified/deleted by the implementer; restored`, })
         const canonical = await fs.readFile(path.join(this.artifactDir(wf), name), 'utf8')
         await fs.mkdir(path.join(wf.workspace.path, '.orchestrator'), { recursive: true })
-        await fs.writeFile(path.join(wf.workspace.path, '.orchestrator', name), canonical)
+        await writeNoFollow(path.join(wf.workspace.path, '.orchestrator', name), canonical)
       }
     }
   }
@@ -324,6 +383,18 @@ export class Engine {
   async reconcileOrphans(active) {
     const result = await terminateOrphan(active)
     return result.note
+  }
+
+  /**
+   * Files that steer the Architect (CLAUDE.md) or the Reviewer (AGENTS.md) are
+   * inputs to *other* agents: the implementer must never author them.
+   */
+  guardInstructionFiles(wf, files) {
+    const steering = files.filter((file) => /(^|\/)(AGENTS\.md|CLAUDE\.md)$/.test(file) || file === '.claude' || file.startsWith('.claude/') || file === '.codex' || file.startsWith('.codex/'))
+    if (steering.length > 0) {
+      wf.violations.push({ at: new Date().toISOString(), kind: 'instruction_file_modified', detail: `implementer authored agent-instruction files: ${steering.join(', ')}` })
+      throw this.block('instruction_file_modified', `The implementer modified files that steer other agents (${steering.join(', ')}). This can redirect the independent reviewer, so the workflow is blocked before any review happens.`)
+    }
   }
 
   /** Enforce security.allowedPaths on the changed files (empty list = whole worktree). */
@@ -408,7 +479,12 @@ export class Engine {
     const files = out.stdout.split('\n').filter(Boolean)
     let readme = ''
     const readmeName = files.find((f) => /^readme(\.md)?$/i.test(f))
-    if (readmeName) readme = (await fs.readFile(path.join(wf.workspace.path, readmeName), 'utf8').catch(() => '')).slice(0, 3000)
+    if (readmeName) {
+      const readmePath = path.join(wf.workspace.path, readmeName)
+      // A symlink here would send the Architect arbitrary file contents.
+      const stat = await fs.lstat(readmePath).catch(() => null)
+      if (stat?.isFile() && !stat.isSymbolicLink()) readme = (await fs.readFile(readmePath, 'utf8').catch(() => '')).slice(0, 3000)
+    }
     return `Tracked files (${files.length}${files.length > 200 ? ', first 200' : ''}):\n${files.slice(0, 200).join('\n') || '(empty repository)'}\n\n${readme ? `README:\n${readme}` : ''}`
   }
 
@@ -487,6 +563,7 @@ export class Engine {
     await this.guardOriginal(wf)
     await this.guardArtifacts(wf)
     const after = await collectChanges(this.git, wf.workspace.path, wf.workspace.baseSha)
+    this.guardInstructionFiles(wf, after.files)
     this.enforceAllowedPaths(wf, after.files)
     const changed = sha(after.diff) !== sha(before.diff)
     wf.attempts.push({ at: new Date().toISOString(), state: wf.state, changedFiles: after.files.length, diffChanged: changed, report: redact(result.text).slice(0, 2000) })
@@ -533,6 +610,10 @@ export class Engine {
       throw this.block('verification_required', 'Review requires passing deterministic verification first.')
     }
     const changes = await collectChanges(this.git, wf.workspace.path, wf.workspace.baseSha)
+    // The reviewer signs off on a *tree*, not on a truncated diff.
+    const reviewed = await stagedTree(this.git, wf.workspace.path)
+    wf.reviewedTree = reviewed.tree
+    await this.persist(wf)
     const prompt = buildReviewPrompt({ task: wf.task, docs: await this.readArtifacts(wf), changes, verification: wf.verification, baseSha: wf.workspace.baseSha })
     let review
     let parseError
@@ -549,9 +630,9 @@ export class Engine {
     if (!review) throw this.block('invalid_review', `Reviewer output failed validation twice: ${parseError}`)
     // The reviewer is read-only, but verify the tree really is unchanged.
     await this.guardOriginal(wf)
-    const after = await collectChanges(this.git, wf.workspace.path, wf.workspace.baseSha)
-    if (after.diff !== changes.diff) {
-      wf.violations.push({ at: new Date().toISOString(), kind: 'reviewer_modified_tree', detail: 'worktree changed during review' })
+    const after = await stagedTree(this.git, wf.workspace.path)
+    if (after.tree !== reviewed.tree) {
+      wf.violations.push({ at: new Date().toISOString(), kind: 'reviewer_modified_tree', detail: `tree changed during review (${reviewed.tree.slice(0, 12)} -> ${after.tree.slice(0, 12)})` })
       throw this.block('isolation_violation', 'The worktree changed during the read-only review; failing closed.')
     }
     wf.review = review
@@ -597,6 +678,11 @@ export class Engine {
     if (!vOk) throw this.block('verification_required', 'cannot complete without passing verification')
     if (wf.route.review && wf.review?.verdict !== 'APPROVE') throw this.block('review_required', 'cannot complete without reviewer approval')
     await this.guardOriginal(wf)
+    const final = await stagedTree(this.git, wf.workspace.path)
+    if (wf.reviewedTree && final.tree !== wf.reviewedTree) {
+      wf.violations.push({ at: new Date().toISOString(), kind: 'tree_changed_after_review', detail: `reviewed tree ${wf.reviewedTree.slice(0, 12)} but committing ${final.tree.slice(0, 12)}` })
+      throw this.block('tree_changed', 'The worktree changed after the independent review (approval, fix or config drift). Nothing was committed; re-run the review before delivering.')
+    }
     const changes = await collectChanges(this.git, wf.workspace.path, wf.workspace.baseSha)
     this.enforceAllowedPaths(wf, changes.files)
     if (changes.files.length === 0) throw this.block('no_changes', 'no file changes to deliver')

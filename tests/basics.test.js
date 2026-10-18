@@ -32,9 +32,17 @@ test('redaction removes credentials', () => {
   assert.doesNotMatch(JSON.stringify(redactDeep({ a: ['sk-abcdefghijklmnopqrstuvwxyz'] })), /sk-abcdef/)
 })
 test('child env strips credential-like variables', () => {
-  const env = sanitizedEnv({ PATH: '/bin', HOME: '/h', ANTHROPIC_API_KEY: 'x', OPENAI_API_KEY: 'y', MY_SECRET: 'z', GITHUB_AUTH_TOKEN: 't', KEEP: '1' })
+  const env = sanitizedEnv({
+    PATH: '/bin', HOME: '/h', KEEP: '1', KEYBOARD_LAYOUT: 'us',
+    ANTHROPIC_API_KEY: 'x', OPENAI_API_KEY: 'y', MY_SECRET: 'z', GITHUB_AUTH_TOKEN: 't',
+    GITHUB_TOKEN: 'g', GH_TOKEN: 'gh', NPM_TOKEN: 'n', AWS_SECRET_ACCESS_KEY: 'a',
+    AWS_SESSION_TOKEN: 's', HF_TOKEN: 'h', DATABASE_URL: 'postgres://u:p@h/db', HUGGINGFACE_KEY: 'k',
+  })
   assert.equal(env.KEEP, '1')
-  for (const k of ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'MY_SECRET', 'GITHUB_AUTH_TOKEN']) assert.equal(env[k], undefined)
+  assert.equal(env.KEYBOARD_LAYOUT, 'us')
+  for (const key of ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'MY_SECRET', 'GITHUB_AUTH_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN', 'NPM_TOKEN', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN', 'HF_TOKEN', 'DATABASE_URL', 'HUGGINGFACE_KEY']) {
+    assert.equal(env[key], undefined, `${key} must not reach a child process`)
+  }
 })
 test('runProcess: stdin, exit code, shell:false', async () => {
   const r = await runProcess({ command: 'cat', cwd: '/tmp', input: 'hello $(echo injected)' })

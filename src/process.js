@@ -115,7 +115,20 @@ export function runProcess(options) {
         }
       }
       send('SIGTERM')
-      killTimer = setTimeout(() => send('SIGKILL'), 3000)
+      killTimer = setTimeout(() => {
+        send('SIGKILL')
+        // After SIGKILL nothing legitimate remains: release the pipes and settle.
+        setTimeout(() => {
+          if (settled) return
+          try {
+            child.stdout?.destroy()
+            child.stderr?.destroy()
+          } catch {
+            /* ignore */
+          }
+          finish({ exitCode: null, signal: 'SIGKILL' })
+        }, 500).unref?.()
+      }, 3000)
       killTimer.unref?.()
     }
     function onAbort() {
@@ -145,6 +158,20 @@ export function runProcess(options) {
     child.stdin.on('error', () => undefined)
     child.on('error', (error) => finish({ spawnError: String(error?.message ?? error) }))
     child.on('close', (code, sig) => finish({ exitCode: code, signal: sig }))
+    // A grandchild that escaped the process group can keep our pipes open after
+    // the CLI itself exited; fall back to the exit event with a short grace.
+    child.on('exit', (code, sig) => {
+      setTimeout(() => {
+        if (settled) return
+        try {
+          child.stdout?.destroy()
+          child.stderr?.destroy()
+        } catch {
+          /* already gone */
+        }
+        finish({ exitCode: code, signal: sig })
+      }, 500).unref?.()
+    })
     if (child.pid !== undefined) onSpawn?.(child.pid)
 
     signal?.addEventListener('abort', onAbort, { once: true })

@@ -8,7 +8,7 @@ By default the target is the chat's working directory, which must be a git repos
 Security/billing: child env strips credential variables; CLIs are refused unless login is subscription mode; no credential files are read; state/reports are redacted; the implementer cannot rewrite the specification (`.orchestrator/` hashes are verified and restored) and the original working tree is snapshotted and re-checked.
 
 Docs: [architecture](docs/architecture.md) · [security](docs/security.md) · [provider integration](docs/provider-integration.md) · [compatibility report](docs/compatibility-report.md) · [example config](examples/config.yaml).
-Data: `~/.dsh/multi-agent-orchestrator/{workflows,worktrees}`. Tests: `npm test` (56 unit/integration tests, no paid model calls).
+Data: `~/.dsh/multi-agent-orchestrator/{workflows,worktrees}`. Tests: `npm test` (102 unit/integration tests, no paid model calls).
 ## Panel in the Web GUI
 
 A sidebar entry **「多模型编排器 / Multi-Agent Orchestrator」** opens a panel with real visualisations built from Host data only:

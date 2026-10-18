@@ -18,11 +18,12 @@ function fakeRes() {
   return res
 }
 
-function req(method, path, body) {
+function req(method, path, body, contentType = 'application/json') {
   const chunks = body === undefined ? [] : [Buffer.from(JSON.stringify(body))]
   return {
     method,
     url: path,
+    headers: body === undefined ? {} : { 'content-type': contentType },
     async *[Symbol.asyncIterator]() { for (const chunk of chunks) yield chunk },
   }
 }
@@ -39,7 +40,7 @@ const workflows = {
   'wf-b2': { id: 'wf-b2', task: 'done task', mode: 'fast', state: 'COMPLETED', createdAt: '2026-01-02T00:00:00.000Z', fixCycles: 0, config: { maxFixCycles: 3 }, history: [], stages: [], reviews: [], verification: { status: 'passed', results: [] }, violations: [] },
 }
 
-function setup({ rejecting } = {}) {
+function setup({ rejecting, noFence } = {}) {
   const web = fakeWebServer()
   const calls = []
   const store = {
@@ -54,15 +55,15 @@ function setup({ rejecting } = {}) {
   }
   const ctx = {
     webServer: web,
-    connection: { requestRejection: () => (rejecting ? 403 : undefined) },
+    connection: noFence ? undefined : { requestRejection: () => (rejecting ? 403 : undefined) },
   }
   registerRoutes(ctx, { store, engine, log: () => undefined })
   return { route: web.routes[0], calls }
 }
 
-async function call(route, method, sub, body) {
+async function call(route, method, sub, body, contentType) {
   const res = fakeRes()
-  await route.handler(req(method, `${ROUTE_PREFIX}${sub}`, body), res)
+  await route.handler(req(method, `${ROUTE_PREFIX}${sub}`, body, contentType), res)
   return { status: res.statusCode, json: res.body ? JSON.parse(res.body) : null }
 }
 
@@ -124,6 +125,14 @@ test('bad requests are rejected with explicit codes and the trust fence is honou
   const { status, json } = await call(fenced.route, 'GET', '/workflows')
   assert.equal(status, 403)
   assert.equal(json.error.code, 'forbidden')
+  // Without the fence service the API refuses rather than serving privileges.
+  const unfenced = setup({ noFence: true })
+  const denied = await call(unfenced.route, 'GET', '/workflows')
+  assert.equal(denied.status, 503)
+  assert.equal(denied.json.error.code, 'fence_unavailable')
+  // A cross-site form cannot produce application/json.
+  const plain = await call(route, 'POST', '/action', { id: 'wf-a1', action: 'approve' }, 'text/plain')
+  assert.equal(plain.status, 415)
 })
 
 test('registerRoutes returns nothing (so the caller can wait) without a web server', () => {
