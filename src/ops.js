@@ -1,5 +1,6 @@
 /** User-facing operations shared by the `/orchestrate` command and the `orchestrate` agent tool. */
-import { looksLikeReview } from './explain.js'
+import { classifyIntent } from './explain.js'
+import os from 'node:os'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { HELP, parseOrchestrateInput } from './commands.js'
@@ -10,6 +11,20 @@ import { redact } from './security/redaction.js'
 import { ORCHESTRATOR_VERSION } from './version.js'
 
 const NON_GIT_OPTIONS = { init: '初始化 git 并继续', review: '改为只读审查', cancel: '取消' }
+const INTENT_OPTIONS = { review: '只读审查（不改代码）', change: '修改代码', cancel: '取消' }
+
+/** One in-flight git init per directory, so concurrent requests cannot clobber each other. */
+const initLocks = new Map()
+
+/** Directories where `git add -A` would sweep up a whole home or system tree. */
+function unsafeInitTarget(repo) {
+  const target = path.resolve(repo)
+  const home = path.resolve(os.homedir())
+  if (target === path.parse(target).root) return 'it is a filesystem root'
+  if (target === home) return 'it is your home directory'
+  if (home.startsWith(target + path.sep)) return 'it contains your home directory'
+  return null
+}
 
 export function createOps({ ctx, config, engine, store, backends, resolveRepo, jobs, askQuestions }) {
   /** Ask what to do with a non-git target; returns 'init' | 'review' | 'cancel'. */
@@ -39,34 +54,92 @@ export function createOps({ ctx, config, engine, store, backends, resolveRepo, j
       if (label === NON_GIT_OPTIONS.review) return 'review'
       return 'cancel'
     } catch {
-      return 'unavailable'
+      // The card was shown (the service exists) but rejected/was dismissed.
+      return 'cancel'
+    }
+  }
+
+  /** Ask whether an ambiguous request means look or change; 'unavailable' when no card can be shown. */
+  async function askIntent(agent, task) {
+    const ask = typeof askQuestions === 'function' ? askQuestions() : undefined
+    if (!ask || !agent) return 'unavailable'
+    try {
+      const answer = await ask({
+        agent,
+        questions: [{
+          id: 'intent',
+          header: '看还是改？',
+          question: `这句话既像审查又像修改：「${String(task).slice(0, 120)}」。要怎么做？`,
+          detail: '只读审查：Claude 和 Codex 读代码给出问题清单，不改任何文件。修改代码：走完整流水线，在隔离分支上改代码。',
+          options: [
+            { label: INTENT_OPTIONS.review, description: '只给问题清单，不动文件' },
+            { label: INTENT_OPTIONS.change, description: '设计 → 实现 → 验证 → 评审 → 提交到隔离分支' },
+            { label: INTENT_OPTIONS.cancel, description: '什么都不做' },
+          ],
+        }],
+      })
+      const first = answer?.answers?.[0]
+      const label = (first?.custom?.trim() || first?.selected?.[0] || '').trim()
+      if (label === INTENT_OPTIONS.review) return 'review'
+      if (label === INTENT_OPTIONS.change) return 'change'
+      return 'cancel'
+    } catch {
+      return 'cancel'
     }
   }
 
   /**
-   * git init + first commit, all or nothing: on failure the `.git` this call
-   * created (and the .gitignore it wrote) are removed, so a retry asks again
-   * instead of failing later on a repository without HEAD.
+   * git init + first commit, all or nothing. Serialised per directory; only
+   * what this call verifiably created is rolled back on failure.
+   * @returns {Promise<{rollback: () => Promise<void>}>}
    */
   async function initRepository(repo) {
+    const unsafe = unsafeInitTarget(repo)
+    if (unsafe) throw new Error(`refusing to run git init in ${repo}: ${unsafe}. Point --repo at a project folder instead.`)
+    const key = path.resolve(repo)
+    while (initLocks.has(key)) await initLocks.get(key).catch(() => undefined)
+    const job = initUnlocked(repo)
+    initLocks.set(key, job)
+    try {
+      return await job
+    } finally {
+      if (initLocks.get(key) === job) initLocks.delete(key)
+    }
+  }
+
+  async function initUnlocked(repo) {
     const git = engine.git
     const dotGit = path.join(repo, '.git')
-    if (await fs.lstat(dotGit).then(() => true, () => false)) throw new Error(`${dotGit} already exists; refusing to initialise over it`)
     const ignorePath = path.join(repo, '.gitignore')
-    const wroteIgnore = !(await fs.lstat(ignorePath).then(() => true, () => false))
     const hardened = ['-c', 'user.name=DSH Orchestrator', '-c', 'user.email=orchestrator@localhost', '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false']
+    let createdIgnore = false
+    let createdGit = false
+    const rollback = async () => {
+      if (createdGit) await fs.rm(dotGit, { recursive: true, force: true })
+      if (createdIgnore) await fs.rm(ignorePath, { force: true })
+    }
     let step = 'git init'
     try {
-      if (wroteIgnore) await fs.writeFile(ignorePath, 'node_modules/\n.env\n.env.*\n*.pem\n*.key\n.DS_Store\n', { flag: 'wx' })
+      if (await fs.lstat(dotGit).then(() => true, () => false)) throw new Error(`${dotGit} already exists; refusing to initialise over it`)
+      try {
+        await fs.writeFile(ignorePath, 'node_modules/\n.env\n.env.*\n*.pem\n*.key\n.DS_Store\n', { flag: 'wx' })
+        createdIgnore = true // only now is the file ours
+      } catch (error) {
+        if (error?.code !== 'EEXIST') throw error
+      }
+      // Ownership of .git is claimed by creating the directory exclusively
+      // (mkdir without recursive fails if someone else made it).
+      await fs.mkdir(dotGit)
+      createdGit = true
       await git.exec(repo, ['init', '-q'])
       step = 'git add'
       await git.exec(repo, ['add', '-A'])
       step = 'git commit'
       await git.exec(repo, [...hardened, 'commit', '-q', '--no-verify', '--allow-empty', '-m', 'initial import (created by the orchestrator at the user\'s request)'])
+      return { rollback }
     } catch (error) {
-      await fs.rm(dotGit, { recursive: true, force: true })
-      if (wroteIgnore) await fs.rm(ignorePath, { force: true })
-      throw new Error(`could not initialise git in ${repo} (failed at ${step}: ${error?.message ?? error}); nothing was left behind`)
+      await rollback()
+      throw new Error(`could not initialise git in ${repo} (failed at ${step}: ${error?.message ?? error}); only files this attempt created were removed`)
     }
   }
 
@@ -99,18 +172,38 @@ export function createOps({ ctx, config, engine, store, backends, resolveRepo, j
     async run({ task, mode, verify = [], review, repo: repoArg }, agent) {
       // An explicit repo wins; otherwise the chat session's working directory.
       const repo = repoArg ? await resolveRepoPath(repoArg, agent) : await resolveRepo(agent)
-      // "审查/检查/review …" means look, not change: route to the read-only review.
-      const effectiveMode = mode ?? (looksLikeReview(task) ? 'review' : undefined)
+      // No mode given: decide look vs change from the wording, and ask when unsure.
+      let effectiveMode = mode
+      let routingNote = ''
+      if (!mode) {
+        let intent = classifyIntent(task)
+        if (intent === 'ambiguous') {
+          const answer = await askIntent(agent, task)
+          if (answer === 'cancel') return '已取消，什么都没做。'
+          if (answer === 'unavailable') {
+            intent = 'review'
+            routingNote = '（措辞既像审查又像修改，这里无法弹卡片确认，按更安全的只读审查处理；要改代码请加 --mode balanced）'
+          } else intent = answer
+        } else if (intent === 'review') {
+          routingNote = '（按你的措辞判断为只读审查；要改代码请加 --mode balanced）'
+        }
+        if (intent === 'review') effectiveMode = 'review'
+      }
       let wf
       try {
         wf = await engine.start({ task, repo, parent: agent, mode: effectiveMode, verify, review })
       } catch (error) {
         if (error?.code !== 'NOT_GIT_REPO') throw error
         const choice = await askNonGit(agent, repo)
-        if (choice === 'review') wf = await engine.start({ task, repo, parent: agent, mode: 'review', verify })
+        if (choice === 'review') wf = await engine.start({ task, repo, parent: agent, mode: 'review', verify: [] })
         else if (choice === 'init') {
-          await initRepository(repo)
-          wf = await engine.start({ task, repo, parent: agent, mode: effectiveMode, verify, review })
+          const { rollback } = await initRepository(repo)
+          try {
+            wf = await engine.start({ task, repo, parent: agent, mode: effectiveMode, verify, review })
+          } catch (startError) {
+            await rollback().catch(() => undefined)
+            throw new Error(`${startError?.message ?? startError} (the git repository created for this request was removed again)`)
+          }
         } else if (choice === 'unavailable') {
           return `${repo} 不是 git 仓库，没有开始（这里弹不出选择卡片）。\n- 只想看问题：加 --mode review（只读，不需要 git）\n- 要改代码：先在该目录 git init 并提交一次，再重新发起任务`
         } else {
@@ -118,7 +211,7 @@ export function createOps({ ctx, config, engine, store, backends, resolveRepo, j
         }
       }
       if (wf.route?.readOnly) {
-        return `开始只读审查 ${wf.id}：Claude（${config.roles.architect.critiqueModel}）和 Codex（${config.roles.reviewer.model}）同时阅读 ${repo}，不会修改任何文件。完成后结果会直接发到聊天里（通常 2–5 分钟）。`
+        return `开始只读审查 ${wf.id}${routingNote}：Claude（${config.roles.architect.critiqueModel}）和 Codex（${config.roles.reviewer.model}）同时阅读 ${repo}，只用只读权限，结束时核对目录未被改动。完成后结果会直接发到聊天里（通常 2–5 分钟）。`
       }
       const sessionId = agent?.session?.id ?? agent?.id
       const jobId = attachWorkflowJob({ jobs, engine, wf, sessionId })

@@ -42,8 +42,8 @@ Thorough mode stops before committing and asks you **in the chat**: a question c
 
 ## Two kinds of request
 
-- **Look at code** — "审查 / 检查 / 看看有什么问题 / review …" (or `--mode review`): a **read-only review**. Claude (Opus, plan mode, Read/Glob/Grep only) and Codex (read-only sandbox) read the repository in parallel; nothing is implemented, no worktree is created, no file is written, and a git repository is not required. Findings from both are merged (same `file:line` reported twice is shown once, worst severity wins) and posted straight into the chat. If one reviewer is rate-limited, the other's result is still delivered and the gap is stated.
-- **Change code** — everything else: the full pipeline below (plan → implement → verify → review → fix → deliver on a branch).
+- **Look at code** — "审查 / 检查 / 看看有什么问题 / review …", or an explicit "不要修改 / do not fix / read-only" (or `--mode review`): a **read-only review**. Claude (Opus, plan mode, Read/Glob/Grep only) and Codex (read-only sandbox) read the repository in parallel; nothing is implemented, no worktree is created, no file is written, and a git repository is not required. Findings from both are merged (same `file:line` reported twice is shown once, worst severity wins) and posted straight into the chat. If one reviewer is rate-limited, the other's result is still delivered and the gap is stated.
+- **Change code** — change wording (修复/加上/删除/update/remove…): the full pipeline below. Wording that mixes both ("审查…的实现", "review the fix") is never guessed: a card asks look-or-change; without a card it falls back to the read-only review and says so (plan → implement → verify → review → fix → deliver on a branch).
 
 Fewer dead ends: verification commands are inferred from `package.json` when none are given (`verification.autodetect`, default on); a non-git target gets a question card (initialise git / switch to read-only review / cancel) instead of an error; every blocked state is explained in plain language with one concrete next step.
 

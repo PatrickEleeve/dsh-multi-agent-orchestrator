@@ -92,6 +92,10 @@ export class Engine {
     // Fail here, synchronously for the caller, instead of letting the driver
     // discover it later: "not a git repository" is a user error, not a workflow.
     const readOnly = routeFor(mode ?? this.config.orchestrator.mode, { review }).readOnly === true
+    // Checks that need no git run first, so a later git init is never followed
+    // by a policy refusal. A read-only review runs no verification at all.
+    const specs = readOnly ? [] : (verify && verify.length > 0 ? verify : this.config.verification.commands)
+    for (const spec of specs) normalizeVerificationCommand(spec, this.config.verification)
     const probe = await this.git.exec(repo, ['rev-parse', '--show-toplevel'], { allowFail: true })
     if (!readOnly && (probe.spawnError || probe.exitCode !== 0)) {
       if (probe.spawnError) throw new Error(`git could not be run (${probe.spawnError}); is git installed?`)
@@ -102,9 +106,6 @@ export class Engine {
     }
     const effectiveMode = mode ?? this.config.orchestrator.mode
     const route = routeFor(effectiveMode, { review })
-    const specs = verify && verify.length > 0 ? verify : this.config.verification.commands
-    // Fail early on policy violations rather than mid-workflow.
-    for (const spec of specs) normalizeVerificationCommand(spec, this.config.verification)
     const now = new Date().toISOString()
     const wf = {
       id: `wf-${Date.now().toString(36)}-${randomBytes(3).toString('hex')}`,
@@ -504,7 +505,26 @@ export class Engine {
       const head = await this.git.exec(repo, ['rev-parse', 'HEAD'], { allowFail: true })
       return `git:${head.stdout.trim()}:${status.stdout}`
     }
-    return null // not a git repository: rely on the reviewers' read-only sandboxes
+    // Not a git repository: names, sizes and mtimes of up to 20k files
+    // (skipping dependency/VCS folders) are enough to notice a write.
+    const entries = []
+    const skip = new Set(['node_modules', '.git', '.hg', '.svn', 'dist', 'build', '.next', '.venv', '__pycache__'])
+    const walk = async (dir, depth) => {
+      if (entries.length >= 20_000 || depth > 12) return
+      const items = await fs.readdir(dir, { withFileTypes: true }).catch(() => [])
+      for (const item of items.sort((a, b) => a.name.localeCompare(b.name))) {
+        if (skip.has(item.name)) continue
+        const full = path.join(dir, item.name)
+        if (item.isDirectory()) await walk(full, depth + 1)
+        else {
+          const stat = await fs.lstat(full).catch(() => null)
+          if (stat) entries.push(`${path.relative(repo, full)}:${stat.size}:${stat.mtimeMs}`)
+        }
+        if (entries.length >= 20_000) return
+      }
+    }
+    await walk(repo, 0)
+    return `fs:${createHash('sha256').update(entries.join('\n')).digest('hex')}`
   }
 
   /**

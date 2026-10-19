@@ -146,3 +146,13 @@ test('intent: English change verbs need word boundaries (address/prefix are not 
     assert.match(e.what, /raw message/)
   }
 })
+
+test('intent is three-way: nouns and negations do not force a change run', async () => {
+  const { classifyIntent } = await import('../src/explain.js')
+  const cases = {
+    review: ['只审查，不要修改任何文件', 'review, do not fix anything', '看看 prefix 处理有什么问题', 'read-only audit of src/'],
+    change: ['给 login 加上空值', 'update the config loader', '删除没用的导出', '修复登录 bug', 'implement LRU cache'],
+    ambiguous: ['审查 src/foo.js 的实现', '看看这次修复有没有问题', '检查新增的代码', 'review the fix in commit abc', '给 login 加上空值检查', '审查并修复 redaction.js'],
+  }
+  for (const [expected, texts] of Object.entries(cases)) for (const t of texts) assert.equal(classifyIntent(t), expected, t)
+})

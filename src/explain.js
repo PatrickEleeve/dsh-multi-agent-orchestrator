@@ -32,12 +32,34 @@ export function explainBlocker(blocker) {
   return { what: entry.what, next: entry.next, kind: blocker.kind ?? 'unknown' }
 }
 
-/** Heuristic intent: a request to look at code, not to change it. */
+/**
+ * Intent is a guess, so it is three-way: 'review' and 'change' only when the
+ * wording is unambiguous, 'ambiguous' otherwise (the caller asks). Wrongly
+ * choosing 'change' is the expensive mistake (code gets edited), so any
+ * conflict is ambiguous rather than a change.
+ */
 // No \b around CJK: word boundaries do not exist between Chinese characters.
-const REVIEW_INTENT = /(审查|审核|审阅|评审|检查|看看|看一下|找找|有什么问题|有没有问题|code\s*review|\breview\b|\baudit\b)/i
-const CHANGE_INTENT = /(修复|修改|实现|添加|新增|重构|改成|改为|写一个|\b(?:fix|implement|add|refactor|write)\b)/i
+const REVIEW_WORDS = /(审查|审核|审阅|评审|检查|看看|看一下|找找|有什么问题|有没有问题|code\s*review|\breview\b|\baudit\b)/i
+const CHANGE_WORDS = /(修复|修改|实现|添加|新增|重构|改成|改为|改一下|改掉|写一个|加上|加个|加一个|删除|删掉|去掉|优化|更新|升级|替换|迁移|\b(?:fix|implement|add|refactor|write|update|remove|delete|change|rename|migrate|upgrade|improve)\b)/i
+// Explicit read-only constraints: "不要修改", "别改", "只审查", "do not fix", "read-only".
+const READ_ONLY_WORDS = /(不要|别|不许|不准|无需|不用|勿)\s*(修复|修改|改动|改|动|写|实现)|只(读|看|审查|检查|审)|\b(?:do\s*n[o']t|don't|without|no)\s+(?:fix|chang|modif|edit|touch|writ)|\bread[-\s]?only\b/i
 
-export function looksLikeReview(task) {
+/** @returns {'review'|'change'|'ambiguous'} */
+export function classifyIntent(task) {
   const text = String(task ?? '')
-  return REVIEW_INTENT.test(text) && !CHANGE_INTENT.test(text)
+  const review = REVIEW_WORDS.test(text)
+  const readOnly = READ_ONLY_WORDS.test(text)
+  // Strip the negated phrases before looking for change verbs.
+  // Global copy: every negated phrase is removed, not just the first one.
+  const change = CHANGE_WORDS.test(text.replace(new RegExp(READ_ONLY_WORDS.source, 'gi'), ' '))
+  if (readOnly && !change) return 'review'
+  if (review && !change) return 'review'
+  if (change && !review && !readOnly) return 'change'
+  if (!review && !change) return 'change'
+  return 'ambiguous'
+}
+
+/** Back-compat helper: true only for an unambiguous review request. */
+export function looksLikeReview(task) {
+  return classifyIntent(task) === 'review'
 }

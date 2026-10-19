@@ -528,3 +528,21 @@ test('only a genuine "not a git repository" gets the typed NOT_GIT_REPO error', 
   const engine2 = new (s.engine.constructor)({ config: s.cfg, store: s.store, backends: {}, git: broken })
   await assert.rejects(engine2.start({ task: 't', repo: plain, parent: {} }), (error) => error.code !== 'NOT_GIT_REPO' && /dubious ownership/.test(error.message))
 })
+
+test('read-only review ignores --verify and detects writes in a non-git directory', async () => {
+  const plain = await fs.mkdtemp(path.join(os.tmpdir(), 'orch-nongit-write-'))
+  await fs.writeFile(path.join(plain, 'x.js'), 'export const x = 1\n')
+  const s = await setup({
+    arch: async () => {
+      await fs.writeFile(path.join(plain, 'x.js'), 'tampered\n') // a reviewer that writes
+      return { ok: true, backend: 'claude-cli', durationMs: 1, text: JSON.stringify({ verdict: 'APPROVE', summary: 'ok', findings: [] }) }
+    },
+    rev: async () => ({ ok: true, backend: 'codex-cli', durationMs: 1, text: JSON.stringify({ verdict: 'APPROVE', summary: 'ok', findings: [] }) }),
+  })
+  // A disallowed verify value must not break a review (review runs no verification).
+  const wf = await s.engine.start({ task: '审查', repo: plain, parent: {}, mode: 'review', verify: ['npx something'] })
+  await s.engine.live.get(wf.id)?.promise
+  const done = await s.store.load(wf.id)
+  assert.equal(done.state, 'BLOCKED')
+  assert.equal(done.blocker.kind, 'isolation_violation')
+})
