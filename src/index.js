@@ -168,7 +168,7 @@ export function apply(ctx, rawConfig) {
           properties: {
             action: { type: 'string', enum: ['run', 'status', 'cancel', 'resume', 'approve', 'report', 'models', 'test_connections', 'config', 'budget'] },
             task: { type: 'string', description: 'Development task (action=run).' },
-            mode: { type: 'string', enum: ['fast', 'balanced', 'thorough', 'review'], description: 'Routing preset. "review" = read-only review (Claude + Codex read the repo; nothing changes, no git needed). Omitted: review-style requests (审查/检查/review…) route to review, everything else to the configured mode.' },
+            mode: { type: 'string', enum: ['fast', 'balanced', 'thorough', 'review'], description: 'Routing preset. "review" = read-only review (Claude + Codex read the repo; nothing changes, no git needed). Omitted: clearly review-style requests (审查/检查/分析/review…, or \"不要修改\") run as a read-only review; clear change requests use the configured mode; anything mixed or unclear shows the user a look-or-change question (read-only review if no question can be shown). Pass mode explicitly when you already know what the user wants.' },
             verify: { type: 'array', items: { type: 'string' }, description: 'Deterministic verification commands, e.g. ["npm test"]. Executables must be on the configured allow-list.' },
             review: { type: 'boolean', description: 'Override whether the Codex review stage runs.' },
             repo: { type: 'string', description: 'Target git repository (absolute, or relative to the chat working directory). Defaults to the chat working directory.' },
