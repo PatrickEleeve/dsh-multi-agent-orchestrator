@@ -115,6 +115,22 @@ window.__ModuleLoader__.load({
       'time.minutes': ['{n} 分', '{n}m'],
       'time.hours': ['{n} 时', '{n}h'],
       'aria.list': ['工作流列表', 'Workflow list'],
+      'mode.review': ['只读审查', 'Read-only review'],
+      'mode.fast': ['快速', 'Fast'],
+      'mode.balanced': ['标准', 'Balanced'],
+      'mode.thorough': ['严格', 'Thorough'],
+      'summary.reviewers': ['审查者', 'Reviewers'],
+      'summary.findings': ['发现', 'Findings'],
+      'reviewer.ok': ['完成', 'done'],
+      'reviewer.failed': ['未完成', 'did not finish'],
+      'finding.fix': ['建议：', 'Fix: '],
+      'finding.both': ['两边都发现', 'both reviewers'],
+      'callout.next': ['下一步：', 'Next: '],
+      'action.resume': ['继续', 'Resume'],
+      'delivery.worktreeRemoved': ['已自动删除（分支与提交保留）', 'Removed automatically (branch and commit kept)'],
+      'readOnly.note': ['只读：没有修改任何文件。', 'Read-only: no files were changed.'],
+      'readOnly.partial': ['文件较多，只核对了一部分。', 'Large tree: only part of it was checked.'],
+      'readOnly.scope': ['被 .gitignore 忽略的文件与依赖目录不在核对范围内。', 'Ignored files and dependency folders are not checked.'],
     }
 
     const DICTIONARIES = (() => {
@@ -159,6 +175,8 @@ window.__ModuleLoader__.load({
 
     /** Canonical pipeline; the panel shows these five steps, never the raw history. */
     const PIPELINE = ['PLANNING', 'IMPLEMENTING', 'VERIFYING', 'REVIEWING', 'COMPLETED']
+    /** A read-only review never plans, implements or verifies. */
+    const REVIEW_PIPELINE = ['REVIEWING', 'COMPLETED']
 
     /**
      * Per-step status for the pipeline track: done | current | failed | pending,
@@ -171,8 +189,10 @@ window.__ModuleLoader__.load({
       const activeStep = visited.has(wf.state) ? wf.state : null
       let lastVisited = null
       for (const entry of wf.history ?? []) if (PIPELINE.includes(entry.to)) lastVisited = entry.to
+      if ((wf.readOnly === true || wf.mode === 'review') && lastVisited !== 'COMPLETED') lastVisited = 'REVIEWING'
       const durations = stageDurations(wf)
-      return PIPELINE.map((step) => {
+      const track = wf.readOnly === true || wf.mode === 'review' ? REVIEW_PIPELINE : PIPELINE
+      return track.map((step) => {
         let status = 'pending'
         if (wf.state === 'COMPLETED') status = 'done'
         else if (terminal) status = step === lastVisited ? 'failed' : visited.has(step) ? 'done' : 'pending'
@@ -463,9 +483,9 @@ window.__ModuleLoader__.load({
       function Row({ wf, selected, tr, onSelect }) {
         const tone = listTone(wf.state)
         const counts = wf.verificationCounts ?? { pass: 0, total: 0 }
-        const meta = [tr(`state.${wf.state}`), wf.mode, formatShortDuration(Date.parse(wf.finishedAt ?? Date.now()) - Date.parse(wf.createdAt))]
+        const meta = [tr(`state.${wf.state}`), tr(`mode.${wf.mode}`), formatShortDuration(Date.parse(wf.finishedAt ?? Date.now()) - Date.parse(wf.createdAt))]
         if (counts.total > 0) meta.push(`${counts.pass}/${counts.total} ✓`)
-        if (wf.review) meta.push(wf.review)
+        if (wf.review) meta.push(wf.readOnly && wf.findingsCount != null ? `${wf.findingsCount} ${tr('summary.findings')}` : wf.review)
         return h(
           'li',
           { style: { display: 'contents' } },
@@ -705,10 +725,35 @@ window.__ModuleLoader__.load({
               actionButtons)
           : detail.blocker
             ? h('div', { className: 'orch-callout', 'data-tone': 'error' },
-                h('span', { className: 'orch-calloutText' }, `${tr('callout.blocked')} ${detail.blocker.kind} — ${detail.blocker.message}`))
+                h('span', { className: 'orch-calloutText' },
+                  detail.blockerExplained
+                    ? h('span', null,
+                        h('span', null, detail.blockerExplained.what),
+                        h('span', { style: { display: 'block', marginTop: 4 } }, `${tr('callout.next')}${detail.blockerExplained.next}`),
+                        h('span', { className: 'orch-note', style: { display: 'block', marginTop: 4 }, title: detail.blocker.message }, `${detail.blocker.kind}`))
+                    : `${tr('callout.blocked')} ${detail.blocker.kind} — ${detail.blocker.message}`),
+                h('button', { type: 'button', className: 'orch-btn', 'data-kind': 'primary', disabled: busy, onClick: () => void runAction('resume') },
+                  busy && actionPhase === 'resume' ? tr('action.working') : tr('action.resume')))
             : null
 
-        const summary = h(
+        const readOnly = detail.readOnly === true || detail.mode === 'review'
+        const reviewerLine = (detail.reviewOutcomes ?? []).map((o) => `${o.backend === 'claude-cli' ? 'Claude' : o.backend === 'codex-cli' ? 'Codex' : o.backend} ${o.ok ? '✓' : '✗'}`).join(' · ')
+        const summary = readOnly
+          ? h('div', { className: 'orch-summary' },
+              h('div', { className: 'orch-summaryItem' },
+                h('div', { className: 'orch-summaryLabel' }, tr('summary.duration')),
+                h('div', { className: 'orch-summaryValue' }, formatShortDuration(Date.parse(detail.finishedAt ?? Date.now()) - Date.parse(detail.createdAt)))),
+              h('div', { className: 'orch-summaryItem' },
+                h('div', { className: 'orch-summaryLabel' }, tr('summary.reviewers')),
+                h('div', { className: 'orch-summaryValue' }, reviewerLine || tr('detail.notRun')),
+                (detail.reviewOutcomes ?? []).filter((o) => !o.ok).map((o) => h('div', { key: o.backend, className: 'orch-summaryHint', title: o.error ?? '' }, `${o.backend}: ${tr('reviewer.failed')}`))),
+              h('div', { className: 'orch-summaryItem' },
+                h('div', { className: 'orch-summaryLabel' }, tr('summary.review')),
+                h('div', { className: 'orch-summaryValue' }, detail.review ?? tr('detail.notRun'))),
+              h('div', { className: 'orch-summaryItem' },
+                h('div', { className: 'orch-summaryLabel' }, tr('summary.findings')),
+                h('div', { className: 'orch-summaryValue' }, String(findings.length))))
+          : h(
           'div',
           { className: 'orch-summary' },
           h('div', { className: 'orch-summaryItem' },
@@ -734,7 +779,10 @@ window.__ModuleLoader__.load({
               h('div', { className: 'orch-discloseBody' }, findings.map((finding, index) =>
                 h('div', { key: `${finding.description}-${index}`, className: 'orch-finding', 'data-severity': finding.severity },
                   h('span', { className: 'orch-severity', 'data-tone': severityTone(finding.severity) }, tr(`severity.${finding.severity}`)),
-                  h('span', { className: 'orch-findingText' }, finding.description),
+                  h('span', { className: 'orch-findingText' },
+                    finding.description,
+                    (finding.reviewers ?? []).length > 1 ? h('span', { className: 'orch-tag', style: { marginLeft: 8 } }, tr('finding.both')) : null,
+                    finding.suggestedFix ? h('span', { className: 'orch-note', style: { display: 'block', marginTop: 4 } }, `${tr('finding.fix')}${finding.suggestedFix}`) : null),
                   h('span', { className: 'orch-findingWhere' }, finding.file ? `${finding.file}${finding.line ? `:${finding.line}` : ''}` : ''),
                 ))))
           : null
@@ -786,7 +834,9 @@ window.__ModuleLoader__.load({
               h('dt', null, tr('delivery.files')),
               h('dd', null, (detail.delivery.files ?? []).join(' · ')),
               h('dt', null, tr('delivery.worktree')),
-              h('dd', null, h('span', { className: 'orch-mono' }, detail.delivery.worktree), h('button', { type: 'button', className: 'orch-copy', title: tr('delivery.worktree'), 'aria-label': `${tr('common.copy')} ${tr('delivery.worktree')}`, onClick: () => void copy('worktree', detail.delivery.worktree) }, copied === 'worktree' ? tr('common.copied') : tr('common.copy'))),
+              h('dd', null, detail.delivery.worktreeRemoved
+                ? h('span', { className: 'orch-note', style: { marginTop: 0 } }, tr('delivery.worktreeRemoved'))
+                : [h('span', { key: 'p', className: 'orch-mono' }, detail.delivery.worktree), h('button', { key: 'c', type: 'button', className: 'orch-copy', title: tr('delivery.worktree'), 'aria-label': `${tr('common.copy')} ${tr('delivery.worktree')}`, onClick: () => void copy('worktree', detail.delivery.worktree) }, copied === 'worktree' ? tr('common.copied') : tr('common.copy'))]),
               h('dt', null, ''),
               h('dd', { className: 'orch-note', style: { marginTop: 0 } }, tr('delivery.notMerged')))
           : h('div', { className: 'orch-note' }, tr('common.none')))
@@ -839,7 +889,7 @@ window.__ModuleLoader__.load({
               awaiting ? null : h('div', { className: 'orch-titleActions' }, actionButtons)),
             h('div', { className: 'orch-meta' },
               h('span', { className: 'orch-stateTag', 'data-tone': tone }, h('span', { className: 'orch-dot', style: { background: 'currentColor' } }), tr(`state.${detail.state}`)),
-              h('span', { className: 'orch-tag' }, detail.mode),
+              h('span', { className: 'orch-tag' }, tr(`mode.${detail.mode}`)),
               h('span', null, formatShortDuration(Date.parse(detail.finishedAt ?? Date.now()) - Date.parse(detail.createdAt))),
               h('span', { className: 'orch-sep' }, '·'),
               h('span', { className: 'orch-mono' }, detail.id),
@@ -849,14 +899,17 @@ window.__ModuleLoader__.load({
             h(Pipeline, { steps, tr }),
             summary,
             findingsBlock,
-            h('div', { className: 'orch-section' }, verificationBlock),
+            readOnly
+              ? h('div', { className: 'orch-note', style: { margin: '12px 0 0' } },
+                  `${tr('readOnly.note')} ${detail.readOnlyCheck?.partial ? tr('readOnly.partial') : ''} ${tr('readOnly.scope')}`)
+              : h('div', { className: 'orch-section' }, verificationBlock),
             h('div', { className: 'orch-section' }, h(Disclosure, {
               title: tr('section.stages'),
               note: `${(detail.stages ?? []).length}`,
               open: open.stages === true,
               onToggle: () => toggle('stages'),
             }, stageGrid)),
-            h('div', { className: 'orch-section' }, deliveryBlock),
+            readOnly ? null : h('div', { className: 'orch-section' }, deliveryBlock),
             h('div', { className: 'orch-section' }, timelineBlock),
             h('div', { className: 'orch-section' }, usageBlock),
             policyBlock ? h('div', { className: 'orch-section' }, policyBlock) : null,

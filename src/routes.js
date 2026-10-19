@@ -6,6 +6,7 @@
  */
 import { computeMetrics, progressLine } from './orchestrator/engine.js'
 import { redact } from './security/redaction.js'
+import { explainBlocker } from './explain.js'
 
 export const ROUTE_PREFIX = '/orchestrate-api'
 const MAX_BODY_BYTES = 64 * 1024
@@ -34,6 +35,9 @@ const strip = (wf) => ({
   escalations: wf.escalations ?? 0,
   awaitingApproval: wf.awaitingApproval === true,
   blocker: wf.blocker ? { kind: wf.blocker.kind, message: redact(wf.blocker.message ?? '').slice(0, 2000) } : null,
+  // Plain-language "what happened / what to do", same text as the chat notice.
+  blockerExplained: wf.blocker ? explainBlocker(wf.blocker) : null,
+  readOnly: wf.route?.readOnly === true,
   active: wf.active ? { role: wf.active.role, backend: wf.active.backend, startedAt: wf.active.startedAt } : null,
   files: wf.changes?.files ?? [],
   delivery: wf.delivery ?? null,
@@ -54,7 +58,9 @@ function detail(wf) {
     ...strip(wf),
     repo: wf.repo,
     workspace: wf.workspace ? { branch: wf.workspace.branch, path: wf.workspace.path, baseSha: wf.workspace.baseSha } : null,
-    findings: (wf.review?.findings ?? []).map((f) => ({ severity: f.severity, category: f.category, file: f.file, line: f.line, description: redact(f.description) })),
+    findings: (wf.review?.findings ?? []).map((f) => ({ severity: f.severity, category: f.category, file: f.file, line: f.line, description: redact(f.description), suggestedFix: f.suggested_fix ? redact(f.suggested_fix) : null, reviewers: f.reviewers ?? [] })),
+    reviewOutcomes: (wf.reviewOutcomes ?? []).map((o) => ({ backend: o.backend, model: o.model ?? null, ok: o.ok === true, error: o.error ? redact(o.error).slice(0, 300) : null })),
+    readOnlyCheck: wf.readOnlyCheck ?? null,
     reviewSummary: wf.review ? redact(wf.review.summary ?? '') : null,
     verificationResults: (wf.verification?.results ?? []).map((r) => ({ name: r.name, passed: r.passed, exitCode: r.exitCode, durationMs: r.durationMs, testSummary: r.testSummary ?? null })),
     stages: (wf.stages ?? []).map((s) => ({ role: s.role, state: s.state, backend: s.backend, model: s.model ?? null, modelVerified: s.modelVerified === true, ok: s.ok, durationMs: s.durationMs, error: s.error?.kind ?? null })),

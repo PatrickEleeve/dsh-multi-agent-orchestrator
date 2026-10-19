@@ -136,3 +136,75 @@ test('pipeline + duration logic is correct for real workflow shapes', () => {
   // Missing shapes must not throw: a blank panel is the worst outcome.
   assert.doesNotThrow(() => __test.pipelineSteps({ state: 'CREATED' }))
 })
+
+/** Render the panel with a seeded selection/detail (useState call order: list, selected, detail, …). */
+function renderWithDetail(detail, open = {}) {
+  const { registration } = loadClient()
+  let calls = 0
+  const seeds = { 1: detail.id, 2: detail, 8: { __for: detail.id, ...open } } // 8 = disclosure state
+  const react = {
+    createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
+    useState: (initial) => { const i = calls++; return [i in seeds ? seeds[i] : (typeof initial === 'function' ? initial() : initial), () => undefined] },
+    useEffect: () => undefined,
+    useCallback: (fn) => fn,
+    useMemo: (fn) => fn(),
+    useRef: (value) => ({ current: value }),
+    memo: (fn) => fn,
+  }
+  const exported = registration.factory((name) => (name === 'react' ? react : {}))
+  let Panel
+  exported.apply({
+    effect: (fn) => fn(),
+    locale: { register: () => () => undefined, bind: () => (k) => k },
+    slots: { inject: (_n, cb) => cb(), register: (o, c) => { if (o.name === 'main') Panel = c; return () => undefined } },
+  })
+  // Resolve nested function components so their output is inspectable.
+  const expand = (node) => {
+    if (Array.isArray(node)) return node.map(expand)
+    if (!node || typeof node !== 'object') return node
+    if (typeof node.type === 'function') return expand(node.type({ ...node.props, children: node.children }))
+    return { ...node, children: expand(node.children), props: { ...node.props, children: undefined } }
+  }
+  return JSON.stringify(expand(Panel({ t: (k) => k })), (k, v) => (typeof v === 'function' ? '[fn]' : v))
+}
+
+const base = { id: 'wf-1', task: 't', createdAt: '2026-01-01T00:00:00.000Z', finishedAt: '2026-01-01T00:02:00.000Z', history: [], stages: [], verificationResults: [], violations: [], reviews: [], metrics: {} }
+
+test('review-mode detail: Review→Done track, reviewers, fixes, no verification/delivery sections', () => {
+  const out = renderWithDetail({
+    ...base, mode: 'review', readOnly: true, state: 'COMPLETED', review: 'REQUEST_CHANGES',
+    history: [{ at: base.createdAt, from: 'CREATED', to: 'REVIEWING' }, { at: base.finishedAt, from: 'REVIEWING', to: 'COMPLETED' }],
+    reviewOutcomes: [{ backend: 'claude-cli', model: 'claude-opus-5-5', ok: true }, { backend: 'codex-cli', model: null, ok: false, error: 'usage limit' }],
+    findings: [{ severity: 'high', file: 'a.js', line: 3, description: 'bug', suggestedFix: 'do x', reviewers: ['claude-cli', 'codex-cli'] }],
+    readOnlyCheck: { method: 'git', partial: false },
+  })
+  assert.doesNotMatch(out, /state\.PLANNING|state\.IMPLEMENTING|state\.VERIFYING/, 'a review never shows plan/implement/verify steps')
+  assert.match(out, /state\.REVIEWING/)
+  assert.match(out, /Claude ✓ · Codex ✗/)
+  assert.match(out, /finding\.fixdo x/)
+  assert.match(out, /finding\.both/)
+  assert.match(out, /readOnly\.note/)
+  assert.doesNotMatch(out, /section\.verification|section\.delivery|summary\.fix/)
+  assert.doesNotMatch(out, /undefined/)
+})
+
+test('blocked detail: plain-language reason, next step and a Resume button', () => {
+  const out = renderWithDetail({
+    ...base, mode: 'balanced', state: 'BLOCKED', finishedAt: null,
+    history: [{ at: base.createdAt, from: 'CREATED', to: 'PLANNING' }, { at: base.createdAt, from: 'PLANNING', to: 'BLOCKED' }],
+    blocker: { kind: 'rate_limit', message: 'usage limit' },
+    blockerExplained: { kind: 'rate_limit', what: '额度用完了', next: '恢复后继续' },
+  })
+  assert.match(out, /额度用完了/)
+  assert.match(out, /callout\.next恢复后继续/)
+  assert.match(out, /action\.resume/)
+})
+
+test('completed change run: removed worktree is stated, not offered for copying', () => {
+  const out = renderWithDetail({
+    ...base, mode: 'balanced', state: 'COMPLETED',
+    delivery: { branch: 'orchestrate/wf-1', commit: 'abc123', files: ['a.js'], worktree: '/x/wf-1', worktreeRemoved: true },
+  }, { delivery: true })
+  assert.match(out, /delivery\.worktreeRemoved/)
+  assert.doesNotMatch(out, /\/x\/wf-1/)
+})
