@@ -1,5 +1,5 @@
-import { looksLikeReview } from './explain.js'
 /** User-facing operations shared by the `/orchestrate` command and the `orchestrate` agent tool. */
+import { looksLikeReview } from './explain.js'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { HELP, parseOrchestrateInput } from './commands.js'
@@ -9,11 +9,13 @@ import { attachWorkflowJob } from './job-bridge.js'
 import { redact } from './security/redaction.js'
 import { ORCHESTRATOR_VERSION } from './version.js'
 
+const NON_GIT_OPTIONS = { init: '初始化 git 并继续', review: '改为只读审查', cancel: '取消' }
+
 export function createOps({ ctx, config, engine, store, backends, resolveRepo, jobs, askQuestions }) {
   /** Ask what to do with a non-git target; returns 'init' | 'review' | 'cancel'. */
   async function askNonGit(agent, repo) {
     const ask = typeof askQuestions === 'function' ? askQuestions() : undefined
-    if (!ask || !agent) return 'cancel'
+    if (!ask || !agent) return 'unavailable'
     try {
       const answer = await ask({
         agent,
@@ -21,37 +23,56 @@ export function createOps({ ctx, config, engine, store, backends, resolveRepo, j
           id: 'non-git',
           header: '不是 git 仓库',
           question: `${repo} 不是 git 仓库。编排器改代码时要用 git 隔离工作区，怎么处理？`,
-          detail: '初始化会在该目录执行 git init 并把现有文件提交一次（不推送）。只读审查不需要 git，也不会改任何文件。',
+          detail: '初始化会在该目录执行 git init 并把现有文件提交一次（不推送）。没有 .gitignore 时会先写一个忽略 node_modules 与 .env* 的版本；请确认目录里没有其他不该进 git 的密钥文件。只读审查不需要 git，也不会改任何文件。',
           options: [
-            { label: '初始化 git 并继续', description: 'git init + 首次提交，然后按原任务运行' },
-            { label: '改为只读审查', description: '不改代码，只让 Claude 和 Codex 读代码找问题' },
-            { label: '取消', description: '什么都不做' },
+            { label: NON_GIT_OPTIONS.init, description: 'git init + 首次提交（自动忽略 node_modules、.env*），然后按原任务运行' },
+            { label: NON_GIT_OPTIONS.review, description: '不改代码，只让 Claude 和 Codex 读代码找问题' },
+            { label: NON_GIT_OPTIONS.cancel, description: '什么都不做' },
           ],
         }],
       })
+      // Only an exact predefined option authorises anything; free text such as
+      // "初始化会不会影响现有文件？" is a question, not consent.
       const first = answer?.answers?.[0]
       const label = (first?.custom?.trim() || first?.selected?.[0] || '').trim()
-      if (label.startsWith('初始化')) return 'init'
-      if (label.startsWith('改为只读')) return 'review'
+      if (label === NON_GIT_OPTIONS.init) return 'init'
+      if (label === NON_GIT_OPTIONS.review) return 'review'
       return 'cancel'
     } catch {
-      return 'cancel'
+      return 'unavailable'
     }
   }
 
+  /**
+   * git init + first commit, all or nothing: on failure the `.git` this call
+   * created (and the .gitignore it wrote) are removed, so a retry asks again
+   * instead of failing later on a repository without HEAD.
+   */
   async function initRepository(repo) {
     const git = engine.git
-    const identity = ['-c', 'user.name=DSH Orchestrator', '-c', 'user.email=orchestrator@localhost']
-    await git.exec(repo, ['init', '-q'])
-    await git.exec(repo, ['add', '-A'])
-    await git.exec(repo, [...identity, 'commit', '-q', '--allow-empty', '-m', 'initial import (created by the orchestrator at the user\'s request)'])
+    const dotGit = path.join(repo, '.git')
+    if (await fs.lstat(dotGit).then(() => true, () => false)) throw new Error(`${dotGit} already exists; refusing to initialise over it`)
+    const ignorePath = path.join(repo, '.gitignore')
+    const wroteIgnore = !(await fs.lstat(ignorePath).then(() => true, () => false))
+    const hardened = ['-c', 'user.name=DSH Orchestrator', '-c', 'user.email=orchestrator@localhost', '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false']
+    let step = 'git init'
+    try {
+      if (wroteIgnore) await fs.writeFile(ignorePath, 'node_modules/\n.env\n.env.*\n*.pem\n*.key\n.DS_Store\n', { flag: 'wx' })
+      await git.exec(repo, ['init', '-q'])
+      step = 'git add'
+      await git.exec(repo, ['add', '-A'])
+      step = 'git commit'
+      await git.exec(repo, [...hardened, 'commit', '-q', '--no-verify', '--allow-empty', '-m', 'initial import (created by the orchestrator at the user\'s request)'])
+    } catch (error) {
+      await fs.rm(dotGit, { recursive: true, force: true })
+      if (wroteIgnore) await fs.rm(ignorePath, { force: true })
+      throw new Error(`could not initialise git in ${repo} (failed at ${step}: ${error?.message ?? error}); nothing was left behind`)
+    }
   }
 
   /** A repo argument may be absolute or relative to the session's directory. */
   async function resolveRepoPath(value, agent) {
-    const path = await import('node:path')
-    const fs = await import('node:fs/promises')
-    const base = value.startsWith('/') ? value : path.resolve(await resolveRepo(agent), value)
+    const base = path.isAbsolute(value) ? value : path.resolve(await resolveRepo(agent), value)
     const stat = await fs.stat(base).catch(() => null)
     if (!stat || !stat.isDirectory()) throw new Error(`repo "${value}" is not a directory (resolved to ${base})`)
     return base
@@ -84,14 +105,16 @@ export function createOps({ ctx, config, engine, store, backends, resolveRepo, j
       try {
         wf = await engine.start({ task, repo, parent: agent, mode: effectiveMode, verify, review })
       } catch (error) {
-        if (!/not a git repository/.test(String(error?.message))) throw error
+        if (error?.code !== 'NOT_GIT_REPO') throw error
         const choice = await askNonGit(agent, repo)
-        if (choice === 'review') wf = await engine.start({ task, repo, parent: agent, mode: 'review', verify, review })
+        if (choice === 'review') wf = await engine.start({ task, repo, parent: agent, mode: 'review', verify })
         else if (choice === 'init') {
           await initRepository(repo)
           wf = await engine.start({ task, repo, parent: agent, mode: effectiveMode, verify, review })
+        } else if (choice === 'unavailable') {
+          return `${repo} 不是 git 仓库，没有开始（这里弹不出选择卡片）。\n- 只想看问题：加 --mode review（只读，不需要 git）\n- 要改代码：先在该目录 git init 并提交一次，再重新发起任务`
         } else {
-          return `${repo} 不是 git 仓库，没有开始。\n- 只想看问题：用 --mode review（只读，不需要 git）\n- 要改代码：先在该目录 git init 并提交一次，或让我来初始化（再说一次任务即可选择"初始化"）`
+          return `已取消：${repo} 不是 git 仓库，什么都没做。`
         }
       }
       if (wf.route?.readOnly) {

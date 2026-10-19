@@ -94,7 +94,11 @@ export class Engine {
     const readOnly = routeFor(mode ?? this.config.orchestrator.mode, { review }).readOnly === true
     const probe = await this.git.exec(repo, ['rev-parse', '--show-toplevel'], { allowFail: true })
     if (!readOnly && (probe.spawnError || probe.exitCode !== 0)) {
-      throw new Error(`"${repo}" is not a git repository. The orchestrator isolates every run in a git worktree, so the target must be a repository (pass repo="/path/to/repo" or change the chat's working directory).`)
+      if (probe.spawnError) throw new Error(`git could not be run (${probe.spawnError}); is git installed?`)
+      if (!/not a git repository/i.test(probe.stderr ?? '')) throw new Error(`git refused "${repo}": ${(probe.stderr ?? '').trim() || `exit ${probe.exitCode}`}`)
+      const error = new Error(`"${repo}" is not a git repository. The orchestrator isolates every run in a git worktree, so the target must be a repository (pass repo="/path/to/repo" or change the chat's working directory).`)
+      error.code = 'NOT_GIT_REPO'
+      throw error
     }
     const effectiveMode = mode ?? this.config.orchestrator.mode
     const route = routeFor(effectiveMode, { review })

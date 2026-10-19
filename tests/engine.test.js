@@ -519,3 +519,12 @@ test('no verify list: commands are inferred from package.json instead of blockin
   assert.equal(wf.verification.status, 'passed')
   assert.ok(wf.verification.results.some((r) => /npm (run )?test/.test(r.name)), JSON.stringify(wf.verification.results.map((r) => r.name)))
 })
+
+test('only a genuine "not a git repository" gets the typed NOT_GIT_REPO error', async () => {
+  const s = await setup({ impl: good })
+  const plain = await fs.mkdtemp(path.join(os.tmpdir(), 'orch-typed-'))
+  await assert.rejects(s.engine.start({ task: 't', repo: plain, parent: {} }), (error) => error.code === 'NOT_GIT_REPO')
+  const broken = { exec: async () => ({ exitCode: 128, stdout: '', stderr: "fatal: detected dubious ownership in repository" }) }
+  const engine2 = new (s.engine.constructor)({ config: s.cfg, store: s.store, backends: {}, git: broken })
+  await assert.rejects(engine2.start({ task: 't', repo: plain, parent: {} }), (error) => error.code !== 'NOT_GIT_REPO' && /dubious ownership/.test(error.message))
+})

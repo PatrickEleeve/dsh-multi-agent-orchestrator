@@ -28,14 +28,14 @@ const EXPLAIN = {
 /** @param {{kind?:string, message?:string}|null|undefined} blocker */
 export function explainBlocker(blocker) {
   if (!blocker) return null
-  const entry = EXPLAIN[blocker.kind] ?? { what: blocker.message ?? '工作流已暂停。', next: '/orchestrate status 查看详情。' }
+  const entry = (typeof blocker.kind === 'string' && Object.hasOwn(EXPLAIN, blocker.kind) ? EXPLAIN[blocker.kind] : undefined) ?? { what: blocker.message ?? '工作流已暂停。', next: '/orchestrate status 查看详情。' }
   return { what: entry.what, next: entry.next, kind: blocker.kind ?? 'unknown' }
 }
 
 /** Heuristic intent: a request to look at code, not to change it. */
 // No \b around CJK: word boundaries do not exist between Chinese characters.
 const REVIEW_INTENT = /(审查|审核|审阅|评审|检查|看看|看一下|找找|有什么问题|有没有问题|code\s*review|\breview\b|\baudit\b)/i
-const CHANGE_INTENT = /(修复|修改|实现|添加|新增|重构|改成|改为|写一个|fix|implement|add|refactor|write)/i
+const CHANGE_INTENT = /(修复|修改|实现|添加|新增|重构|改成|改为|写一个|\b(?:fix|implement|add|refactor|write)\b)/i
 
 export function looksLikeReview(task) {
   const text = String(task ?? '')

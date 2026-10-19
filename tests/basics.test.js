@@ -134,3 +134,15 @@ test('intent: review-style requests route to read-only review, change requests d
   assert.match(e.next, /resume|验证/)
   assert.ok(explainBlocker({ kind: 'something_new', message: 'raw' }).what.includes('raw'))
 })
+
+test('intent: English change verbs need word boundaries (address/prefix are not "add"/"fix")', async () => {
+  const { looksLikeReview, explainBlocker } = await import('../src/explain.js')
+  assert.equal(looksLikeReview('review the address parser'), true)
+  assert.equal(looksLikeReview('看看 prefix 处理有什么问题'), true)
+  assert.equal(looksLikeReview('review and fix the parser'), false)
+  for (const kind of ['constructor', 'toString', '__proto__']) {
+    const e = explainBlocker({ kind, message: 'raw message' })
+    assert.equal(typeof e.what, 'string')
+    assert.match(e.what, /raw message/)
+  }
+})
