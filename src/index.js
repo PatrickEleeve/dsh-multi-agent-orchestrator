@@ -162,7 +162,7 @@ export function apply(ctx, rawConfig) {
       ctx.tools.register({
         name: 'orchestrate',
         description:
-          'Run or inspect the multi-model engineering workflow (Claude Code CLI architect → DeepSeek native implementer → deterministic verification → Codex CLI reviewer → repair loop). Work happens on an isolated git worktree branch that is never merged or pushed. action=run starts a background workflow for the current working directory (a git repo); other actions: status, cancel, resume, approve, report, models, test_connections, config, budget.',
+          'Multi-model engineering workflow. Two kinds of run: (1) review — Claude (Opus) and Codex read the repository in parallel and report findings; nothing is changed and no git repo is needed (chosen automatically for review-style requests such as 审查/检查/review, or mode="review"); (2) change — Claude architect → DeepSeek implementer → deterministic verification → Codex review → repair loop, on an isolated git worktree branch that is never merged or pushed. action=run starts it in the background and the result is posted to the chat; other actions: status, cancel, resume, approve, report, models, test_connections, config, budget.',
         parameters: {
           type: 'object',
           properties: {
