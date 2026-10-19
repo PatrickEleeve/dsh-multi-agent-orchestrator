@@ -1,2 +1,2 @@
 /** Bumped whenever the loaded plugin generation changes; shown by /orchestrate config. */
-export const ORCHESTRATOR_VERSION = '1.8.2'
+export const ORCHESTRATOR_VERSION = '1.8.3'

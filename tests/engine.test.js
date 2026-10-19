@@ -546,3 +546,30 @@ test('read-only review ignores --verify and detects writes in a non-git director
   assert.equal(done.state, 'BLOCKED')
   assert.equal(done.blocker.kind, 'isolation_violation')
 })
+
+// ------------------------------------------------- read-only fingerprint
+
+test('readOnlyFingerprint (git): untouched passes; content writes to clean, dirty and untracked files are caught', async () => {
+  const s = await setup({ impl: good })
+  const fp = (m) => s.engine.readOnlyFingerprint(s.repo, m)
+  await fs.writeFile(path.join(s.repo, 'dirty.txt'), 'v1') // untracked, already "dirty"
+  const base = await fp()
+  assert.equal(base.method, 'git')
+  assert.equal((await fp('git')).digest, base.digest, 'untouched repo must pass')
+  await fs.writeFile(path.join(s.repo, 'dirty.txt'), 'v2') // same status (??), new content
+  const second = await fp('git')
+  assert.notEqual(second.digest, base.digest, 'a second write to an already-dirty file must be caught')
+  await fs.writeFile(path.join(s.repo, 'README.md'), '# changed\n') // clean tracked file
+  assert.notEqual((await fp('git')).digest, second.digest)
+})
+
+test('readOnlyFingerprint (fs): non-git edits and new empty directories are caught; method is reused', async () => {
+  const s = await setup({ impl: good })
+  const plain = await fs.mkdtemp(path.join(os.tmpdir(), 'orch-fp-'))
+  await fs.writeFile(path.join(plain, 'a.js'), '1')
+  const base = await s.engine.readOnlyFingerprint(plain)
+  assert.equal(base.method, 'fs')
+  assert.equal((await s.engine.readOnlyFingerprint(plain, 'fs')).digest, base.digest)
+  await fs.mkdir(path.join(plain, 'new-empty-dir'))
+  assert.notEqual((await s.engine.readOnlyFingerprint(plain, 'fs')).digest, base.digest)
+})

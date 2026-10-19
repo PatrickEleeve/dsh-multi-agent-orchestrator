@@ -39,10 +39,11 @@ export function explainBlocker(blocker) {
  * conflict is ambiguous rather than a change.
  */
 // No \b around CJK: word boundaries do not exist between Chinese characters.
-const REVIEW_WORDS = /(审查|审核|审阅|评审|检查|看看|看一下|找找|有什么问题|有没有问题|code\s*review|\breview\b|\baudit\b)/i
+const REVIEW_WORDS = /(审查|审核|审阅|评审|检查|看看|看一下|看下|瞧瞧|找找|分析|排查|诊断|解释|有什么问题|有没有问题|code\s*review|\b(?:review|audit|check|inspect|analy[sz]e|explain)\b|\blook\s+at\b|\bwhat\s+does\b)/i
 const CHANGE_WORDS = /(修复|修改|实现|添加|新增|重构|改成|改为|改一下|改掉|写一个|加上|加个|加一个|删除|删掉|去掉|优化|更新|升级|替换|迁移|\b(?:fix|implement|add|refactor|write|update|remove|delete|change|rename|migrate|upgrade|improve)\b)/i
 // Explicit read-only constraints: "不要修改", "别改", "只审查", "do not fix", "read-only".
-const READ_ONLY_WORDS = /(不要|别|不许|不准|无需|不用|勿)\s*(修复|修改|改动|改|动|写|实现)|只(读|看|审查|检查|审)|\b(?:do\s*n[o']t|don't|without|no)\s+(?:fix|chang|modif|edit|touch|writ)|\bread[-\s]?only\b/i
+// 别 only as a word of its own, not inside 识别/区别.
+const READ_ONLY_WORDS = /(不要|(?<![\u4e00-\u9fff])别|不许|不准|无需|不用|勿)\s*(修复|修改|改动|改|动|写|实现)|只(读|看|审查|检查|审)|\b(?:do\s*n[o']t|don't|without|no)\s+(?:fix|chang|modif|edit|touch|writ)|\bread[-\s]?only\b/i
 
 /** @returns {'review'|'change'|'ambiguous'} */
 export function classifyIntent(task) {
@@ -55,7 +56,7 @@ export function classifyIntent(task) {
   if (readOnly && !change) return 'review'
   if (review && !change) return 'review'
   if (change && !review && !readOnly) return 'change'
-  if (!review && !change) return 'change'
+  // No recognisable signal is not consent to edit code: ask.
   return 'ambiguous'
 }
 

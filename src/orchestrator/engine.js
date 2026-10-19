@@ -498,33 +498,63 @@ export class Engine {
     throw this.block('backend_failed', `${role} backend "${backendName}" failed after ${MAX_STAGE_RETRIES + 1} attempts: ${result.error?.message ?? 'unknown error'}`)
   }
 
-  /** Cheap fingerprint proving a read-only review left the repository alone. */
-  async readOnlyFingerprint(repo) {
-    const status = await this.git.exec(repo, ['status', '--porcelain=v1', '--untracked-files=all'], { allowFail: true })
-    if (!status.spawnError && status.exitCode === 0) {
+  /**
+   * Fingerprint proving a read-only review left the target alone. The method
+   * (git or filesystem walk) is chosen once and reused for the after-snapshot,
+   * so a transient git failure cannot flip methods and fake a violation.
+   * Git: HEAD + status of the target path + CONTENT of every modified or
+   * untracked file (status alone misses a second write to a dirty file).
+   * Ignored files and the walk's skipped folders are not covered.
+   */
+  async readOnlyFingerprint(repo, method) {
+    const useGit = method ? method === 'git' : await this.git.exec(repo, ['rev-parse', '--show-toplevel'], { allowFail: true }).then((r) => !r.spawnError && r.exitCode === 0)
+    const hash = createHash('sha256')
+    if (useGit) {
       const head = await this.git.exec(repo, ['rev-parse', 'HEAD'], { allowFail: true })
-      return `git:${head.stdout.trim()}:${status.stdout}`
+      const status = await this.git.exec(repo, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--', '.'], { allowFail: true })
+      hash.update(`head:${head.stdout.trim()}\0status:${status.exitCode}:${status.stdout}\0`)
+      const dirty = await this.git.exec(repo, ['ls-files', '-z', '-m', '-o', '--exclude-standard', '--', '.'], { allowFail: true })
+      const files = [...new Set(dirty.stdout.split('\0').filter(Boolean))].sort().slice(0, 5000)
+      for (const rel of files) {
+        const full = path.join(repo, rel)
+        const stat = await fs.lstat(full).catch(() => null)
+        if (!stat) hash.update(`${rel}:missing\0`)
+        else if (stat.isSymbolicLink()) hash.update(`${rel}:link:${await fs.readlink(full).catch(() => '?')}\0`)
+        else if (stat.isFile() && stat.size <= 8 * 1024 * 1024) hash.update(`${rel}:file:`).update(await fs.readFile(full).catch(() => Buffer.from('?'))).update('\0')
+        else hash.update(`${rel}:${stat.size}:${stat.mtimeMs}\0`)
+      }
+      return { method: 'git', digest: hash.digest('hex') }
     }
-    // Not a git repository: names, sizes and mtimes of up to 20k files
-    // (skipping dependency/VCS folders) are enough to notice a write.
-    const entries = []
     const skip = new Set(['node_modules', '.git', '.hg', '.svn', 'dist', 'build', '.next', '.venv', '__pycache__'])
+    let count = 0
+    let truncated = false
     const walk = async (dir, depth) => {
-      if (entries.length >= 20_000 || depth > 12) return
-      const items = await fs.readdir(dir, { withFileTypes: true }).catch(() => [])
+      if (count >= 20_000 || depth > 12) { truncated = true; return }
+      let items
+      try {
+        items = await fs.readdir(dir, { withFileTypes: true })
+      } catch (error) {
+        hash.update(`${path.relative(repo, dir)}:unreadable:${error?.code}\0`)
+        return
+      }
       for (const item of items.sort((a, b) => a.name.localeCompare(b.name))) {
         if (skip.has(item.name)) continue
         const full = path.join(dir, item.name)
-        if (item.isDirectory()) await walk(full, depth + 1)
-        else {
+        const rel = path.relative(repo, full)
+        count += 1
+        if (item.isDirectory()) {
+          hash.update(`${rel}/\0`)
+          await walk(full, depth + 1)
+        } else {
           const stat = await fs.lstat(full).catch(() => null)
-          if (stat) entries.push(`${path.relative(repo, full)}:${stat.size}:${stat.mtimeMs}`)
+          hash.update(stat ? `${rel}:${stat.size}:${stat.mtimeMs}\0` : `${rel}:gone\0`)
         }
-        if (entries.length >= 20_000) return
+        if (count >= 20_000) { truncated = true; return }
       }
     }
     await walk(repo, 0)
-    return `fs:${createHash('sha256').update(entries.join('\n')).digest('hex')}`
+    hash.update(`truncated:${truncated}`)
+    return { method: 'fs', digest: hash.digest('hex'), truncated }
   }
 
   /**
@@ -535,6 +565,7 @@ export class Engine {
   async stageStandaloneReview(wf, signal) {
     const prompt = buildStandaloneReviewPrompt({ task: wf.task, repo: wf.repo })
     const before = await this.readOnlyFingerprint(wf.repo)
+    wf.readOnlyCheck = { method: before.method, partial: before.truncated === true }
     const attempt = async (backend, fn) => {
       try {
         const result = await fn()
@@ -558,8 +589,8 @@ export class Engine {
           { model: this.config.roles.reviewer.model, timeoutMs: this.config.roles.reviewer.timeoutMs, signal, scratchDir: this.store.dir(wf.id), ...extra },
         ), signal)),
     ])
-    const after = await this.readOnlyFingerprint(wf.repo)
-    if (before !== after) {
+    const after = await this.readOnlyFingerprint(wf.repo, before.method)
+    if (before.digest !== after.digest) {
       wf.violations.push({ at: new Date().toISOString(), kind: 'review_modified_repo', detail: 'the repository changed during a read-only review' })
       throw this.block('isolation_violation', 'The repository changed while it was being reviewed read-only (by you or a tool). The findings may not match the code; run the review again.')
     }

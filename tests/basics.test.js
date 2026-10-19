@@ -156,3 +156,10 @@ test('intent is three-way: nouns and negations do not force a change run', async
   }
   for (const [expected, texts] of Object.entries(cases)) for (const t of texts) assert.equal(classifyIntent(t), expected, t)
 })
+
+test('intent: no recognisable signal asks instead of editing; 别 inside 识别 is not a negation', async () => {
+  const { classifyIntent } = await import('../src/explain.js')
+  for (const t of ['帮我看下 auth 流程', '分析这个 bug', '解释一下这个函数', 'check the parser for bugs', 'what does engine.start do']) assert.equal(classifyIntent(t), 'review', t)
+  for (const t of ['弄一下 auth', 'make it faster']) assert.equal(classifyIntent(t), 'ambiguous', t)
+  assert.notEqual(classifyIntent('识别修复建议'), 'review')
+})

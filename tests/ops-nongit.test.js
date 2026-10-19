@@ -161,12 +161,57 @@ test('git init is refused for the home directory and filesystem roots', async ()
   }
 })
 
-test('two concurrent inits of one directory: exactly one succeeds, nothing of the winner is deleted', async () => {
+test('two concurrent inits of one directory: one initialises, the other reuses it; nothing is deleted', async () => {
   const dir = await plainDir()
   const mk = () => harness({ answer: { answers: [{ selected: ['初始化 git 并继续'] }] } }).ops
   const results = await Promise.allSettled([mk().run({ task: '修复 a.js', repo: dir }, { id: 'a' }), mk().run({ task: '修复 a.js', repo: dir }, { id: 'b' })])
-  assert.equal(results.filter((r) => r.status === 'fulfilled').length, 1, JSON.stringify(results.map((r) => r.reason?.message ?? 'ok')))
+  assert.equal(results.filter((r) => r.status === 'fulfilled').length, 2, JSON.stringify(results.map((r) => r.reason?.message ?? 'ok')))
   const log = await new Git().exec(dir, ['log', '--oneline'])
+  assert.equal(log.stdout.trim().split('\n').length, 1, 'exactly one initial commit')
   assert.match(log.stdout, /initial import/)
   assert.match(await fs.readFile(path.join(dir, '.gitignore'), 'utf8'), /node_modules/)
+})
+
+test('choosing "change" never falls back to a read-only default mode', async () => {
+  const dir = await plainDir()
+  await new Git().exec(dir, ['init', '-q'])
+  const started = []
+  const engine = { git: new Git(), start: async (r) => { started.push(r); return { id: 'wf', mode: r.mode, route: { readOnly: r.mode === 'review' } } } }
+  const reviewDefault = { ...config, orchestrator: { ...config.orchestrator, mode: 'review' } }
+  const ops = createOps({ ctx: {}, config: reviewDefault, engine, store: { list: async () => [] }, backends: {}, resolveRepo: async () => '/tmp', askQuestions: () => async () => ({ answers: [{ selected: ['修改代码'] }] }) })
+  await ops.run({ task: '审查 a.js 的实现', repo: dir }, { id: 'agent' })
+  assert.equal(started[0].mode, 'balanced')
+})
+
+test('a provider that throws synchronously is "unavailable", not a crash', async () => {
+  const dir = await plainDir()
+  const engine = { git: new Git(), start: async (r) => ({ id: 'wf', mode: r.mode, route: { readOnly: r.mode === 'review' } }) }
+  const ops = createOps({ ctx: {}, config, engine, store: { list: async () => [] }, backends: {}, resolveRepo: async () => '/tmp', askQuestions: () => { throw new Error('no service') } })
+  assert.match(await ops.run({ task: '审查 a.js 的实现', repo: dir }, { id: 'agent' }), /无法弹卡片确认/)
+})
+
+test('a symlink or case alias of the home directory cannot bypass the init guard', async () => {
+  const link = path.join(await fs.mkdtemp(path.join(os.tmpdir(), 'orch-homelink-')), 'home')
+  await fs.symlink(os.homedir(), link, 'dir')
+  const targets = [link]
+  if (process.platform === 'darwin') targets.push(os.homedir().toUpperCase())
+  for (const target of targets) {
+    const { ops } = harness({ answer: { answers: [{ selected: ['初始化 git 并继续'] }] } })
+    await assert.rejects(ops.run({ task: '修复 a.js', repo: target }, { id: 'agent' }), /refusing to run git init/, target)
+  }
+})
+
+test('a repo created while the card was open is used, not re-initialised', async () => {
+  const dir = await plainDir()
+  let first = true
+  const engine = {
+    git: new Git(),
+    start: async (r) => {
+      if (first) { first = false; await new Git().exec(dir, ['init', '-q']); const e = new Error('x'); e.code = 'NOT_GIT_REPO'; throw e }
+      return { id: 'wf', mode: r.mode, route: { readOnly: false } }
+    },
+  }
+  const ops = createOps({ ctx: {}, config, engine, store: { list: async () => [] }, backends: {}, resolveRepo: async () => '/tmp', askQuestions: () => async () => ({ answers: [{ selected: ['初始化 git 并继续'] }] }) })
+  await ops.run({ task: '修复 a.js', repo: dir }, { id: 'agent' })
+  assert.equal(await fs.lstat(path.join(dir, '.gitignore')).then(() => true, () => false), false, 'no init happened')
 })

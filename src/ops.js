@@ -16,11 +16,17 @@ const INTENT_OPTIONS = { review: '只读审查（不改代码）', change: '修�
 /** One in-flight git init per directory, so concurrent requests cannot clobber each other. */
 const initLocks = new Map()
 
+/** Real on-disk path: resolves symlinks and, on macOS, the stored letter case. */
+async function canonical(p) {
+  const real = await fs.realpath(p).catch(() => path.resolve(p))
+  return process.platform === 'darwin' || process.platform === 'win32' ? real.toLowerCase() : real
+}
+
 /** Directories where `git add -A` would sweep up a whole home or system tree. */
-function unsafeInitTarget(repo) {
-  const target = path.resolve(repo)
-  const home = path.resolve(os.homedir())
-  if (target === path.parse(target).root) return 'it is a filesystem root'
+async function unsafeInitTarget(repo) {
+  const target = await canonical(repo)
+  const home = await canonical(os.homedir())
+  if (target === (await canonical(path.parse(path.resolve(repo)).root))) return 'it is a filesystem root'
   if (target === home) return 'it is your home directory'
   if (home.startsWith(target + path.sep)) return 'it contains your home directory'
   return null
@@ -29,7 +35,12 @@ function unsafeInitTarget(repo) {
 export function createOps({ ctx, config, engine, store, backends, resolveRepo, jobs, askQuestions }) {
   /** Ask what to do with a non-git target; returns 'init' | 'review' | 'cancel'. */
   async function askNonGit(agent, repo) {
-    const ask = typeof askQuestions === 'function' ? askQuestions() : undefined
+    let ask
+    try {
+      ask = typeof askQuestions === 'function' ? askQuestions() : undefined
+    } catch {
+      ask = undefined
+    }
     if (!ask || !agent) return 'unavailable'
     try {
       const answer = await ask({
@@ -61,7 +72,12 @@ export function createOps({ ctx, config, engine, store, backends, resolveRepo, j
 
   /** Ask whether an ambiguous request means look or change; 'unavailable' when no card can be shown. */
   async function askIntent(agent, task) {
-    const ask = typeof askQuestions === 'function' ? askQuestions() : undefined
+    let ask
+    try {
+      ask = typeof askQuestions === 'function' ? askQuestions() : undefined
+    } catch {
+      ask = undefined
+    }
     if (!ask || !agent) return 'unavailable'
     try {
       const answer = await ask({
@@ -94,9 +110,9 @@ export function createOps({ ctx, config, engine, store, backends, resolveRepo, j
    * @returns {Promise<{rollback: () => Promise<void>}>}
    */
   async function initRepository(repo) {
-    const unsafe = unsafeInitTarget(repo)
+    const unsafe = await unsafeInitTarget(repo)
     if (unsafe) throw new Error(`refusing to run git init in ${repo}: ${unsafe}. Point --repo at a project folder instead.`)
-    const key = path.resolve(repo)
+    const key = await canonical(repo)
     while (initLocks.has(key)) await initLocks.get(key).catch(() => undefined)
     const job = initUnlocked(repo)
     initLocks.set(key, job)
@@ -109,6 +125,10 @@ export function createOps({ ctx, config, engine, store, backends, resolveRepo, j
 
   async function initUnlocked(repo) {
     const git = engine.git
+    // Another request (or the user) may have created the repository while the
+    // card was open: use it instead of failing.
+    const probe = await git.exec(repo, ['rev-parse', '--show-toplevel'], { allowFail: true })
+    if (!probe.spawnError && probe.exitCode === 0) return { rollback: async () => undefined }
     const dotGit = path.join(repo, '.git')
     const ignorePath = path.join(repo, '.gitignore')
     const hardened = ['-c', 'user.name=DSH Orchestrator', '-c', 'user.email=orchestrator@localhost', '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false']
@@ -188,6 +208,11 @@ export function createOps({ ctx, config, engine, store, backends, resolveRepo, j
           routingNote = '（按你的措辞判断为只读审查；要改代码请加 --mode balanced）'
         }
         if (intent === 'review') effectiveMode = 'review'
+        else {
+          // An explicit "change" must change code even if the default mode is read-only.
+          const fallback = config.orchestrator?.mode
+          effectiveMode = fallback && fallback !== 'review' ? fallback : 'balanced'
+        }
       }
       let wf
       try {
@@ -211,7 +236,7 @@ export function createOps({ ctx, config, engine, store, backends, resolveRepo, j
         }
       }
       if (wf.route?.readOnly) {
-        return `开始只读审查 ${wf.id}${routingNote}：Claude（${config.roles.architect.critiqueModel}）和 Codex（${config.roles.reviewer.model}）同时阅读 ${repo}，只用只读权限，结束时核对目录未被改动。完成后结果会直接发到聊天里（通常 2–5 分钟）。`
+        return `开始只读审查 ${wf.id}${routingNote}：Claude（${config.roles.architect.critiqueModel}）和 Codex（${config.roles.reviewer.model}）同时阅读 ${repo}，只用只读权限，结束时核对文件未被改动（被 .gitignore 忽略的文件和 node_modules 等依赖目录不在核对范围内）。完成后结果会直接发到聊天里（通常 2–5 分钟）。`
       }
       const sessionId = agent?.session?.id ?? agent?.id
       const jobId = attachWorkflowJob({ jobs, engine, wf, sessionId })
