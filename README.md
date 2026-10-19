@@ -40,6 +40,13 @@ If the Codex CLI reports a usage limit (or is unavailable / unauthenticated / ti
 
 Thorough mode stops before committing and asks you **in the chat**: a question card shows the branch, changed files, verification result, review verdict and findings, with **Approve** / **Reject**. No workflow id and no slash command is needed. If the card cannot be shown (no UI attached), the same gate is reachable from plain language via the `orchestrate` tool (`action: approve|reject`) or `/orchestrate approve` — the id is optional there too: it targets the newest workflow awaiting approval.
 
+## Two kinds of request
+
+- **Look at code** — "审查 / 检查 / 看看有什么问题 / review …" (or `--mode review`): a **read-only review**. Claude (Opus, plan mode, Read/Glob/Grep only) and Codex (read-only sandbox) read the repository in parallel; nothing is implemented, no worktree is created, no file is written, and a git repository is not required. Findings from both are merged (same `file:line` reported twice is shown once, worst severity wins) and posted straight into the chat. If one reviewer is rate-limited, the other's result is still delivered and the gap is stated.
+- **Change code** — everything else: the full pipeline below (plan → implement → verify → review → fix → deliver on a branch).
+
+Fewer dead ends: verification commands are inferred from `package.json` when none are given (`verification.autodetect`, default on); a non-git target gets a question card (initialise git / switch to read-only review / cancel) instead of an error; every blocked state is explained in plain language with one concrete next step.
+
 ## Housekeeping and cost visibility
 
 - **Worktree cleanup**: a completed run removes its isolated worktree (`orchestrator.removeWorktreeOnSuccess: true`, default); the delivered branch and its commits stay in the repository. Set it to `false` to keep the checkout for inspection; a failed removal is recorded as a policy event instead of failing the run.

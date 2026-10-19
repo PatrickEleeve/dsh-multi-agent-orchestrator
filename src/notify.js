@@ -6,6 +6,9 @@
  */
 import { randomUUID } from 'node:crypto'
 import { redact } from './security/redaction.js'
+import { explainBlocker } from './explain.js'
+
+const SEVERITY_ICON = { critical: '🔴', high: '🟠', medium: '🟡', low: '⚪', info: '·' }
 
 const ICON = { COMPLETED: '✅', BLOCKED: '⛔', FAILED: '❌', CANCELLED: '🚫' }
 
@@ -31,9 +34,29 @@ export function renderWorkflowNotice(wf) {
     lines.push(`Files: ${wf.delivery.files.slice(0, 10).join(', ')}${wf.delivery.files.length > 10 ? ` (+${wf.delivery.files.length - 10} more)` : ''}`)
     lines.push(`Worktree: ${wf.delivery.worktree}`)
   }
+  if (wf.mode === 'review' && wf.state === 'COMPLETED') {
+    const findings = wf.review?.findings ?? []
+    const who = (wf.reviewOutcomes ?? []).map((o) => `${o.backend}${o.model ? `(${o.model})` : ''}${o.ok ? '' : ' ✗'}`).join(' + ')
+    lines.push(`Read-only review by ${who || 'reviewers'} — verdict ${wf.review?.verdict ?? 'n/a'}, ${findings.length} finding(s). Nothing was changed.`)
+    if (wf.review?.summary) lines.push(wf.review.summary)
+    for (const f of findings.slice(0, 15)) {
+      const where = f.file ? `${f.file}${f.line ? `:${f.line}` : ''}` : '-'
+      lines.push(`${SEVERITY_ICON[f.severity] ?? '•'} [${f.severity}] ${where} — ${f.description}${f.suggested_fix ? `\n    fix: ${f.suggested_fix}` : ''}${(f.reviewers ?? []).length > 1 ? '  (both reviewers)' : ''}`)
+    }
+    if (findings.length > 15) lines.push(`(+${findings.length - 15} more in /orchestrate report ${wf.id})`)
+    const failed = (wf.reviewOutcomes ?? []).filter((o) => !o.ok)
+    for (const o of failed) lines.push(`Note: ${o.backend} did not finish (${o.error}); the result above is from the other reviewer only.`)
+    lines.push('Say "修复这些问题" if you want them fixed through the full pipeline.')
+    return redact(lines.join('\n'))
+  }
   lines.push(stats)
   if ((wf.fallbacks ?? []).length) lines.push(`Reviewer fallback: ${wf.fallbacks.map((entry) => `${entry.from}→${entry.to} (${entry.reason})`).join(', ')} — primary backend was unavailable; this is recorded, not silent.`)
-  if (wf.blocker) lines.push(`Blocker (${wf.blocker.kind}): ${wf.blocker.message}`)
+  const explained = explainBlocker(wf.blocker)
+  if (explained) {
+    lines.push(`原因：${explained.what}`)
+    lines.push(`下一步：${explained.next}`)
+    lines.push(`(detail ${explained.kind}: ${wf.blocker.message})`)
+  }
   if (wf.state === 'COMPLETED') lines.push('Say "merge"/"push" explicitly if you want more: the orchestrator never does either automatically.')
   return redact(lines.join('\n'))
 }

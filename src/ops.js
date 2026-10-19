@@ -1,3 +1,4 @@
+import { looksLikeReview } from './explain.js'
 /** User-facing operations shared by the `/orchestrate` command and the `orchestrate` agent tool. */
 import fs from 'node:fs/promises'
 import path from 'node:path'
@@ -8,7 +9,44 @@ import { attachWorkflowJob } from './job-bridge.js'
 import { redact } from './security/redaction.js'
 import { ORCHESTRATOR_VERSION } from './version.js'
 
-export function createOps({ ctx, config, engine, store, backends, resolveRepo, jobs }) {
+export function createOps({ ctx, config, engine, store, backends, resolveRepo, jobs, askQuestions }) {
+  /** Ask what to do with a non-git target; returns 'init' | 'review' | 'cancel'. */
+  async function askNonGit(agent, repo) {
+    const ask = typeof askQuestions === 'function' ? askQuestions() : undefined
+    if (!ask || !agent) return 'cancel'
+    try {
+      const answer = await ask({
+        agent,
+        questions: [{
+          id: 'non-git',
+          header: '不是 git 仓库',
+          question: `${repo} 不是 git 仓库。编排器改代码时要用 git 隔离工作区，怎么处理？`,
+          detail: '初始化会在该目录执行 git init 并把现有文件提交一次（不推送）。只读审查不需要 git，也不会改任何文件。',
+          options: [
+            { label: '初始化 git 并继续', description: 'git init + 首次提交，然后按原任务运行' },
+            { label: '改为只读审查', description: '不改代码，只让 Claude 和 Codex 读代码找问题' },
+            { label: '取消', description: '什么都不做' },
+          ],
+        }],
+      })
+      const first = answer?.answers?.[0]
+      const label = (first?.custom?.trim() || first?.selected?.[0] || '').trim()
+      if (label.startsWith('初始化')) return 'init'
+      if (label.startsWith('改为只读')) return 'review'
+      return 'cancel'
+    } catch {
+      return 'cancel'
+    }
+  }
+
+  async function initRepository(repo) {
+    const git = engine.git
+    const identity = ['-c', 'user.name=DSH Orchestrator', '-c', 'user.email=orchestrator@localhost']
+    await git.exec(repo, ['init', '-q'])
+    await git.exec(repo, ['add', '-A'])
+    await git.exec(repo, [...identity, 'commit', '-q', '--allow-empty', '-m', 'initial import (created by the orchestrator at the user\'s request)'])
+  }
+
   /** A repo argument may be absolute or relative to the session's directory. */
   async function resolveRepoPath(value, agent) {
     const path = await import('node:path')
@@ -40,7 +78,25 @@ export function createOps({ ctx, config, engine, store, backends, resolveRepo, j
     async run({ task, mode, verify = [], review, repo: repoArg }, agent) {
       // An explicit repo wins; otherwise the chat session's working directory.
       const repo = repoArg ? await resolveRepoPath(repoArg, agent) : await resolveRepo(agent)
-      const wf = await engine.start({ task, repo, parent: agent, mode, verify, review })
+      // "审查/检查/review …" means look, not change: route to the read-only review.
+      const effectiveMode = mode ?? (looksLikeReview(task) ? 'review' : undefined)
+      let wf
+      try {
+        wf = await engine.start({ task, repo, parent: agent, mode: effectiveMode, verify, review })
+      } catch (error) {
+        if (!/not a git repository/.test(String(error?.message))) throw error
+        const choice = await askNonGit(agent, repo)
+        if (choice === 'review') wf = await engine.start({ task, repo, parent: agent, mode: 'review', verify, review })
+        else if (choice === 'init') {
+          await initRepository(repo)
+          wf = await engine.start({ task, repo, parent: agent, mode: effectiveMode, verify, review })
+        } else {
+          return `${repo} 不是 git 仓库，没有开始。\n- 只想看问题：用 --mode review（只读，不需要 git）\n- 要改代码：先在该目录 git init 并提交一次，或让我来初始化（再说一次任务即可选择"初始化"）`
+        }
+      }
+      if (wf.route?.readOnly) {
+        return `开始只读审查 ${wf.id}：Claude（${config.roles.architect.critiqueModel}）和 Codex（${config.roles.reviewer.model}）同时阅读 ${repo}，不会修改任何文件。完成后结果会直接发到聊天里（通常 2–5 分钟）。`
+      }
       const sessionId = agent?.session?.id ?? agent?.id
       const jobId = attachWorkflowJob({ jobs, engine, wf, sessionId })
       return `Started workflow ${wf.id} (mode=${wf.mode}) — you will get a notification in this chat when it finishes.${jobId ? `\nBackground job: ${jobId} (progress in the Jobs panel; job_kill stops it)` : ''}\nRepository: ${repo}\nTrack it with: /orchestrate status ${wf.id}\nRoles: architect=claude-cli/${config.roles.architect.model} · implementer=dsh-native/${config.roles.implementer.provider}/${config.roles.implementer.model} (reasoning ${config.roles.implementer.reasoning}) · reviewer=codex-cli/${config.roles.reviewer.model}`

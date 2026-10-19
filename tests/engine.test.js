@@ -455,3 +455,67 @@ test('verification runner records evidence and times out', async () => {
   const t = await runVerification({ cwd: dir, specs: [{ command: 'node', args: ['s.js'], timeoutMs: 300 }], policy })
   assert.equal(t.results[0].timedOut, true); assert.equal(t.status, 'failed')
 })
+
+// ---------------------------------------------------------------- review mode
+
+test('review mode: both reviewers read the repo, nothing is written, findings merged', async () => {
+  const finding = (file, line, severity) => ({ severity, category: 'correctness', file, line, description: `${file} bug`, suggested_fix: 'fix it' })
+  const s = await setup({
+    impl: async () => { throw new Error('the implementer must not run in review mode') },
+    arch: async (req, opt) => {
+      assert.match(req.prompt, /read-only review of an existing codebase/)
+      assert.equal(opt.permissionMode, 'plan')
+      return { ok: true, backend: 'claude-cli', model: 'claude-opus-5-5', durationMs: 1, text: JSON.stringify({ verdict: 'REQUEST_CHANGES', summary: 'claude', findings: [finding('a.js', 3, 'medium'), finding('b.js', 9, 'low')] }) }
+    },
+    rev: async () => ({ ok: true, backend: 'codex-cli', model: 'gpt-6-astra', durationMs: 1, text: JSON.stringify({ verdict: 'REQUEST_CHANGES', summary: 'codex', findings: [finding('a.js', 3, 'high')] }) }),
+  })
+  const before = git(s.repo, 'status', '--porcelain')
+  const wf = await s.run({ mode: 'review' })
+  assert.equal(wf.state, 'COMPLETED', JSON.stringify(wf.blocker))
+  assert.equal(wf.workspace, undefined, 'no worktree is created')
+  assert.equal(git(s.repo, 'status', '--porcelain'), before)
+  assert.equal(wf.review.verdict, 'REQUEST_CHANGES')
+  assert.equal(wf.review.findings.length, 2, 'a.js:3 reported by both is merged')
+  assert.equal(wf.review.findings[0].file, 'a.js')
+  assert.equal(wf.review.findings[0].severity, 'high', JSON.stringify({ review: wf.review, outcomes: wf.reviewOutcomes }))
+  assert.deepEqual([...wf.review.findings[0].reviewers].sort(), ['claude-cli', 'codex-cli'])
+  assert.equal(wf.reviews.length, 2)
+})
+
+test('review mode: one reviewer rate-limited still completes with the other', async () => {
+  const s = await setup({
+    arch: async () => ({ ok: true, backend: 'claude-cli', model: 'claude-opus-5-5', durationMs: 1, text: JSON.stringify({ verdict: 'APPROVE', summary: 'fine', findings: [] }) }),
+    rev: async () => ({ ok: false, backend: 'codex-cli', durationMs: 1, error: { kind: 'rate_limit', message: 'usage limit' } }),
+  })
+  const wf = await s.run({ mode: 'review' })
+  assert.equal(wf.state, 'COMPLETED')
+  assert.deepEqual(wf.reviewOutcomes.map((o) => [o.backend, o.ok]), [['claude-cli', true], ['codex-cli', false]])
+})
+
+test('review mode works on a directory that is not a git repository', async () => {
+  const plain = await fs.mkdtemp(path.join(os.tmpdir(), 'orch-plain-review-'))
+  await fs.writeFile(path.join(plain, 'x.js'), 'export const x = 1\n')
+  const s = await setup({
+    arch: async () => ({ ok: true, backend: 'claude-cli', durationMs: 1, text: JSON.stringify({ verdict: 'APPROVE', summary: 'ok', findings: [] }) }),
+    rev: async () => ({ ok: true, backend: 'codex-cli', durationMs: 1, text: JSON.stringify({ verdict: 'APPROVE', summary: 'ok', findings: [] }) }),
+  })
+  const wf = await s.engine.start({ task: '审查 x.js', repo: plain, parent: {}, mode: 'review' })
+  await s.engine.live.get(wf.id)?.promise
+  const done = await s.store.load(wf.id)
+  assert.equal(done.state, 'COMPLETED', JSON.stringify(done.blocker))
+})
+
+test('no verify list: commands are inferred from package.json instead of blocking', async () => {
+  const s = await setup({
+    verify: [],
+    impl: async (req) => {
+      await good(req)
+      await fs.writeFile(path.join(req.cwd, 'package.json'), JSON.stringify({ name: 'x', scripts: { test: 'node check.js' } }))
+      return { ok: true, backend: 'dsh-native', text: 'done', model: 'deepseek-flash', durationMs: 1 }
+    },
+  })
+  const wf = await s.run()
+  assert.equal(wf.state, 'COMPLETED', JSON.stringify(wf.blocker))
+  assert.equal(wf.verification.status, 'passed')
+  assert.ok(wf.verification.results.some((r) => /npm (run )?test/.test(r.name)), JSON.stringify(wf.verification.results.map((r) => r.name)))
+})

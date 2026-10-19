@@ -97,3 +97,27 @@ export function parseReview(text) {
   }
   return { ok: true, review: { verdict: j.verdict, summary: j.summary, findings } }
 }
+
+
+/**
+ * Read-only review of an existing codebase (mode "review"). There is no diff and
+ * no implementer: the reviewer reads the repository itself.
+ * @param {{task:string, repo:string}} p
+ */
+export function buildStandaloneReviewPrompt({ task, repo }) {
+  return `You are an INDEPENDENT CODE REVIEWER doing a read-only review of an existing codebase. You must not modify, create or delete any file.
+${UNTRUSTED_NOTICE}
+
+Repository root: ${repo}
+${fence('REVIEW REQUEST (from the user)', task)}
+
+How to work:
+- Read the code yourself (list files, open the relevant modules, follow call paths). Do not guess about code you did not open.
+- Prefer real defects over style: correctness, security, data loss, concurrency, error handling, broken contracts, missing tests for risky paths.
+- Every finding must name a file and line you actually read and explain the concrete failure mode.
+- If the request names specific files or areas, focus there.
+
+Reply with ONLY a JSON object, no prose around it:
+{"verdict":"APPROVE|REQUEST_CHANGES|BLOCKED","summary":"2-4 sentences","findings":[{"severity":"critical|high|medium|low|info","category":"...","file":"path or null","line":123,"description":"what is wrong and why it matters","suggested_fix":"minimal fix or null"}]}
+Use REQUEST_CHANGES when there is at least one medium-or-worse finding, APPROVE when there is none, BLOCKED only when you could not review (e.g. the code is unreadable).`
+}

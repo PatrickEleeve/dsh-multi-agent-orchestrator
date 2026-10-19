@@ -2,7 +2,7 @@
 import os from 'node:os'
 import path from 'node:path'
 
-export const MODES = ['fast', 'balanced', 'thorough']
+export const MODES = ['fast', 'balanced', 'thorough', 'review']
 
 export const DEFAULTS = Object.freeze({
   orchestrator: {
@@ -53,7 +53,9 @@ export const DEFAULTS = Object.freeze({
     enabled: true,
     requiredBeforeReview: true,
     failClosed: true,
-    autodetect: false,
+    // Infer `npm test` / `npm run lint` etc. from package.json when the request
+    // and config supply no commands, instead of blocking with no_verification.
+    autodetect: true,
     commands: [],
     allowedExecutables: ['npm', 'node', 'pnpm', 'yarn', 'tsc', 'pytest', 'python3', 'python', 'cargo', 'go', 'make', 'ruff', 'eslint', 'mypy'],
     timeoutMs: 10 * 60_000,

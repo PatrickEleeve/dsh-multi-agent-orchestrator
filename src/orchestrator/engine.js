@@ -7,10 +7,11 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { createHash, randomBytes } from 'node:crypto'
 import { routeFor } from './routing.js'
+import { explainBlocker } from '../explain.js'
 import { transition, isTerminal } from './state-machine.js'
 import { ARTIFACT_FILES, buildArchitectPrompt, parseArchitectOutput } from '../agents/architect.js'
 import { buildFixPrompt, buildImplementPrompt } from '../agents/implementer.js'
-import { REVIEW_SCHEMA, buildReviewPrompt, parseReview } from '../agents/reviewer.js'
+import { REVIEW_SCHEMA, buildReviewPrompt, parseReview, buildStandaloneReviewPrompt } from '../agents/reviewer.js'
 import { isPathAllowed, normalizeVerificationCommand } from '../security/permissions.js'
 import { runVerification, verificationFingerprint } from '../verification/runner.js'
 import { terminateOrphan } from '../process.js'
@@ -90,8 +91,9 @@ export class Engine {
     try {
     // Fail here, synchronously for the caller, instead of letting the driver
     // discover it later: "not a git repository" is a user error, not a workflow.
+    const readOnly = routeFor(mode ?? this.config.orchestrator.mode, { review }).readOnly === true
     const probe = await this.git.exec(repo, ['rev-parse', '--show-toplevel'], { allowFail: true })
-    if (probe.spawnError || probe.exitCode !== 0) {
+    if (!readOnly && (probe.spawnError || probe.exitCode !== 0)) {
       throw new Error(`"${repo}" is not a git repository. The orchestrator isolates every run in a git worktree, so the target must be a repository (pass repo="/path/to/repo" or change the chat's working directory).`)
     }
     const effectiveMode = mode ?? this.config.orchestrator.mode
@@ -281,14 +283,15 @@ export class Engine {
   async drive(wf, entry) {
     const signal = entry.controller.signal
     try {
-      if (!wf.workspace) await this.prepareWorkspace(wf)
+      if (!wf.workspace && !wf.route.readOnly) await this.prepareWorkspace(wf)
       let guard = 0
       while (!isTerminal(wf)) {
         if (signal.aborted) throw new Halt('cancelled', 'cancelled by user')
         if (++guard > 200) throw new Error('internal loop guard tripped')
         switch (wf.state) {
           case 'CREATED':
-            await this.move(wf, wf.route.architect ? 'PLANNING' : 'IMPLEMENTING', 'workspace ready')
+            if (wf.route.readOnly) await this.move(wf, 'REVIEWING', 'read-only review')
+            else await this.move(wf, wf.route.architect ? 'PLANNING' : 'IMPLEMENTING', 'workspace ready')
             break
           case 'PLANNING':
             await this.stagePlanning(wf, signal)
@@ -301,7 +304,8 @@ export class Engine {
             await this.stageVerify(wf, signal)
             break
           case 'REVIEWING':
-            await this.stageReview(wf, signal)
+            if (wf.route.readOnly) await this.stageStandaloneReview(wf, signal)
+            else await this.stageReview(wf, signal)
             break
           case 'BLOCKED':
             return
@@ -447,13 +451,16 @@ export class Engine {
     let result
     for (let attempt = 0; attempt <= MAX_STAGE_RETRIES; attempt++) {
       if (signal.aborted) throw new Halt('cancelled', 'cancelled')
-      wf.active = { role, backend: backendName, startedAt: new Date().toISOString(), attempt: attempt + 1 }
+      // Kept per call: parallel reviewers share `wf.active`, so a sibling may
+      // clear it before this call finishes.
+      const started = { role, backend: backendName, startedAt: new Date().toISOString(), attempt: attempt + 1 }
+      wf.active = started
       await this.persist(wf)
       // Record the live child pid so a crash mid-run can be reconciled at startup
       // (a killed CLI does not undo filesystem changes, and a leftover CLI must not
       // keep writing into the worktree).
       const onPid = (pid, executable) => {
-        wf.active = { ...(wf.active ?? {}), pid, executable }
+        wf.active = { ...started, pid, executable }
         void this.persist(wf).catch(() => undefined)
       }
       result = await fn({ onPid })
@@ -464,7 +471,7 @@ export class Engine {
         model: result.model ?? null,
         requestedModel: result.requestedModel ?? null,
         modelVerified: result.modelVerified ?? false,
-        startedAt: wf.active.startedAt,
+        startedAt: started.startedAt,
         durationMs: result.durationMs,
         ok: result.ok,
         usage: result.usage ?? null,
@@ -484,6 +491,64 @@ export class Engine {
       }
     }
     throw this.block('backend_failed', `${role} backend "${backendName}" failed after ${MAX_STAGE_RETRIES + 1} attempts: ${result.error?.message ?? 'unknown error'}`)
+  }
+
+  /** Cheap fingerprint proving a read-only review left the repository alone. */
+  async readOnlyFingerprint(repo) {
+    const status = await this.git.exec(repo, ['status', '--porcelain=v1', '--untracked-files=all'], { allowFail: true })
+    if (!status.spawnError && status.exitCode === 0) {
+      const head = await this.git.exec(repo, ['rev-parse', 'HEAD'], { allowFail: true })
+      return `git:${head.stdout.trim()}:${status.stdout}`
+    }
+    return null // not a git repository: rely on the reviewers' read-only sandboxes
+  }
+
+  /**
+   * Mode "review": Claude (plan mode, read-only tools) and Codex (read-only
+   * sandbox) review the repository in parallel. No worktree, no implementer,
+   * no file writes. One reviewer may be unavailable; both failing blocks.
+   */
+  async stageStandaloneReview(wf, signal) {
+    const prompt = buildStandaloneReviewPrompt({ task: wf.task, repo: wf.repo })
+    const before = await this.readOnlyFingerprint(wf.repo)
+    const attempt = async (backend, fn) => {
+      try {
+        const result = await fn()
+        const parsed = parseReview(result.text)
+        if (!parsed.ok) return { backend, error: `unparseable review: ${parsed.error}` }
+        return { backend, model: result.model ?? null, review: parsed.review }
+      } catch (error) {
+        if (error instanceof Halt && error.kind === 'cancelled') throw error
+        return { backend, error: error?.message ?? String(error), kind: error?.blockKind }
+      }
+    }
+    const outcomes = await Promise.all([
+      attempt('claude-cli', () => this.callBackend(wf, 'reviewer:claude', 'claude-cli', (extra) =>
+        this.backends.architect.execute(
+          { prompt, cwd: wf.repo, runId: `${wf.id}-review-claude` },
+          { model: this.config.roles.architect.critiqueModel ?? 'opus', timeoutMs: this.config.roles.reviewer.timeoutMs, signal, permissionMode: 'plan', ...extra },
+        ), signal)),
+      attempt('codex-cli', () => this.callBackend(wf, 'reviewer:codex', 'codex-cli', (extra) =>
+        this.backends.reviewer.execute(
+          { prompt, cwd: wf.repo, outputSchema: REVIEW_SCHEMA, runId: `${wf.id}-review-codex` },
+          { model: this.config.roles.reviewer.model, timeoutMs: this.config.roles.reviewer.timeoutMs, signal, scratchDir: this.store.dir(wf.id), ...extra },
+        ), signal)),
+    ])
+    const after = await this.readOnlyFingerprint(wf.repo)
+    if (before !== after) {
+      wf.violations.push({ at: new Date().toISOString(), kind: 'review_modified_repo', detail: 'the repository changed during a read-only review' })
+      throw this.block('isolation_violation', 'The repository changed while it was being reviewed read-only (by you or a tool). The findings may not match the code; run the review again.')
+    }
+    const ok = outcomes.filter((o) => o.review)
+    wf.reviewOutcomes = outcomes.map((o) => ({ backend: o.backend, model: o.model ?? null, ok: Boolean(o.review), error: o.error ?? null }))
+    if (ok.length === 0) {
+      const kinds = outcomes.map((o) => `${o.backend}: ${o.error}`).join(' | ')
+      throw this.block(outcomes.some((o) => o.kind === 'rate_limit') ? 'rate_limit' : 'backend_failed', `Neither reviewer could finish: ${kinds}`)
+    }
+    for (const o of ok) wf.reviews.push({ at: new Date().toISOString(), ...o.review, backend: o.backend, model: o.model })
+    wf.review = mergeReviews(ok)
+    wf.verification = { status: 'skipped', results: [], reason: 'read-only review' }
+    await this.move(wf, 'COMPLETED', `read-only review by ${ok.map((o) => o.backend).join(' + ')}`)
   }
 
   async repoOverview(wf) {
@@ -793,6 +858,33 @@ export function computeMetrics(wf) {
   }
 }
 
+const SEVERITY_RANK = { critical: 0, high: 1, medium: 2, low: 3, info: 4 }
+
+/** Combine independent reviews: worst verdict wins, findings deduplicated by file:line. */
+export function mergeReviews(outcomes) {
+  const verdictRank = { BLOCKED: 0, REQUEST_CHANGES: 1, APPROVE: 2 }
+  const verdict = outcomes.map((o) => o.review.verdict).sort((a, b) => verdictRank[a] - verdictRank[b])[0]
+  const seen = new Map()
+  for (const o of outcomes) {
+    for (const finding of o.review.findings) {
+      const key = `${finding.file ?? '-'}:${finding.line ?? '-'}`
+      const existing = seen.get(key)
+      if (existing && finding.file) {
+        if (!existing.reviewers.includes(o.backend)) existing.reviewers.push(o.backend)
+        if (SEVERITY_RANK[finding.severity] < SEVERITY_RANK[existing.severity]) existing.severity = finding.severity
+        continue
+      }
+      seen.set(finding.file ? key : `${key}:${seen.size}`, { ...finding, reviewers: [o.backend] })
+    }
+  }
+  const findings = [...seen.values()].sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity])
+  return {
+    verdict,
+    summary: outcomes.map((o) => `[${o.backend}] ${o.review.summary}`).join(' '),
+    findings,
+  }
+}
+
 export function renderReport(wf) {
   const m = computeMetrics(wf)
   const lines = [
@@ -857,8 +949,7 @@ export function describe(wf) {
     wf.review?.findings?.length ? `  open findings: ${wf.review.findings.map((f) => `[${f.severity}] ${f.description}`.slice(0, 90)).join(' | ')}` : '',
     wf.blocker ? `  BLOCKER (${wf.blocker.kind}): ${wf.blocker.message}` : '',
     (wf.fallbacks ?? []).length ? `  fallback: ${wf.fallbacks.map((entry) => `${entry.from}→${entry.to} (${entry.reason})`).join(', ')}` : '',
-    wf.blocker?.kind === 'awaiting_approval' ? '  NEXT: approve — click the approval card in the chat or say "approve"; the workflow id is optional' : '',
-    wf.state === 'BLOCKED' && wf.blocker?.kind !== 'awaiting_approval' ? '  NEXT: resolve the blocker, then "/orchestrate resume" (id optional)' : '',
+    wf.state === 'BLOCKED' && wf.blocker ? `  原因：${explainBlocker(wf.blocker).what}\n  下一步：${explainBlocker(wf.blocker).next}` : '',
     wf.delivery ? `  delivered: branch ${wf.delivery.branch} commit ${wf.delivery.commit?.slice(0, 10)} (not merged/pushed)\n  worktree: ${wf.delivery.worktree}` : '',
   ].filter(Boolean).join('\n')
 }

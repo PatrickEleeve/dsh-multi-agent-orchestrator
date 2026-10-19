@@ -23,7 +23,7 @@ test('notice states real evidence and never invents a verdict', () => {
   assert.match(text, /not merged or pushed/)
   const blocked = renderWorkflowNotice({ ...completed, state: 'BLOCKED', delivery: undefined, blocker: { kind: 'rate_limit', message: 'usage limit' } })
   assert.match(blocked, /⛔/)
-  assert.match(blocked, /Blocker \(rate_limit\): usage limit/)
+  assert.match(blocked, /原因：.*订阅额度[\s\S]*下一步：[\s\S]*detail rate_limit: usage limit/)
   const missing = renderWorkflowNotice({ ...completed, review: null, verification: null, delivery: undefined })
   assert.match(missing, /verification: not run · review: n\/a/)
 })

@@ -43,4 +43,6 @@ Architecture review model: `roles.architect.critiqueModel` (default `opus`) driv
 
 1.7.0 hardening: verification args refuse inline evaluation (`node -e`, `python -c`) and `npx`; persistence writes are serialised per workflow; cancel cannot be raced by resume/approve; completed runs remove their worktree (`removeWorktreeOnSuccess`); `/orchestrate budget` aggregates real spend/usage. All covered by tests (110).
 
+1.8.0: read-only `review` mode (Claude + Codex in parallel, no worktree/implementer/writes, non-git allowed, merged findings in chat); intent routing for review-style requests; verification autodetect on by default; non-git question card; plain-language blocker explanations. Fixed a real race found by the new tests: parallel backend calls shared `wf.active`.
+
 Not verified: DSH-level sandbox restriction of the native child (profile runs danger-full-access; child inherits parent permissions). Mitigation: post-run checks that the original repo is untouched and `.orchestrator/` spec is intact; worktree is not a security sandbox.

@@ -124,3 +124,13 @@ test('routing presets', () => {
   assert.equal(routeFor('thorough').critique, true)
   assert.throws(() => routeFor('x'))
 })
+
+test('intent: review-style requests route to read-only review, change requests do not', async () => {
+  const { looksLikeReview, explainBlocker } = await import('../src/explain.js')
+  for (const t of ['审查这个插件', '帮我检查一下 src/security', 'review the auth module', '看看这段代码有什么问题']) assert.equal(looksLikeReview(t), true, t)
+  for (const t of ['修复登录 bug', 'implement LRU cache', '审查并修复 redaction.js', '添加一个 FAQ']) assert.equal(looksLikeReview(t), false, t)
+  const e = explainBlocker({ kind: 'no_verification', message: 'x' })
+  assert.match(e.what, /验证命令/)
+  assert.match(e.next, /resume|验证/)
+  assert.ok(explainBlocker({ kind: 'something_new', message: 'raw' }).what.includes('raw'))
+})
